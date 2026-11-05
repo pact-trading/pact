@@ -1,0 +1,17 @@
+# Vercel deploys apps/web (pay.pactagent.app). It needs the workspace manifests
+# and packages/*, nothing else. Secrets and local state never leave the machine.
+.env*
+.local/
+.vercel/
+*.sqlite*
+node_modules/
+.next/
+.next-dev/
+.next-preview/
+.runtime/
+playwright-report/
+test-results/
+contracts/
+# Root docs folder only: a bare `docs/` also matched the web app's /docs page (apps/web/src/app/docs).
+/docs/
+*.pdf

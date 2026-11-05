@@ -1,0 +1,12 @@
+node_modules
+.next*
+dist
+out
+coverage
+playwright-report
+test-results
+pnpm-lock.yaml
+contracts/lib
+contracts/out
+contracts/cache
+apps/web/tsconfig.json

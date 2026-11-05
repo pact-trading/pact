@@ -1,0 +1,24 @@
+node_modules/
+.next/
+.next-dev/
+.next-preview/
+.next-live/
+.env*
+.runtime/
+/.local/
+*.sqlite*
+.DS_Store
+playwright-report/
+test-results/
+**/contracts/out/
+**/contracts/cache/
+**/contracts/broadcast/
+.vercel
+
+*.tsbuildinfo
+
+# Generated on-chain deployment / activation / verification artifacts (never committed)
+contracts/deployment*.json
+contracts/activation*.json
+docs/x402/*evidence*.json
+docs/x402/whitechain-readonly.json

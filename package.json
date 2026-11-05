@@ -1,0 +1,31 @@
+{
+  "name": "pact-pay",
+  "private": true,
+  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build:packages": "pnpm --filter \"./packages/*\" build",
+    "build": "pnpm build:packages && pnpm --filter @pact/web build",
+    "typecheck": "pnpm build:packages && pnpm -r --if-present typecheck",
+    "test": "pnpm build:packages && pnpm -r --if-present test",
+    "test:contracts": "cd contracts && forge test",
+    "dev": "pnpm --filter @pact/web dev",
+    "dev:api": "pnpm --filter @pact/api dev",
+    "preview": "node scripts/preview.mjs",
+    "live": "node scripts/live.mjs",
+    "live:check": "pnpm --filter @pact/web live:check",
+    "e2e": "pnpm --filter @pact/web e2e",
+    "format": "prettier --write apps/web",
+    "format:check": "prettier --check apps/web",
+    "docs:deploy": "node scripts/docs-deploy.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}
