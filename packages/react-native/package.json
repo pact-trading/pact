@@ -1,0 +1,40 @@
+{
+  "name": "@pactagent/react-native",
+  "version": "0.1.0",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "pnpm --filter @pactagent/core build && vitest run",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@pactagent/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "react-native": ">=0.76.0"
+  },
+  "devDependencies": {
+    "@types/react-test-renderer": "19.1.0",
+    "react": "^19.2.0",
+    "react-native": "^0.81.0",
+    "react-test-renderer": "19.2.0",
+    "vitest": "^3.2.7"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ]
+}
