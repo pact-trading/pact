@@ -1,0 +1,37 @@
+{
+  "name": "@pact/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:router-gas": "tsx scripts/check-router-gas.ts",
+    "drain-attack": "tsx scripts/drain-attack.ts",
+    "x402:prepare": "tsx scripts/x402/prepare.ts",
+    "test:x402-fork": "tsx scripts/x402/fork.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.6",
+    "@privy-io/node": "0.37.0",
+    "@x402/core": "2.29.0",
+    "@x402/evm": "2.29.0",
+    "@x402/fetch": "2.29.0",
+    "better-sqlite3": "^12.4.1",
+    "hono": "^4.10.2",
+    "nodemailer": "^10.3.1",
+    "viem": "^2.38.6"
+  },
+  "devDependencies": {
+    "@pactagent/core": "workspace:*",
+    "@pactagent/node": "workspace:*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.9.1",
+    "@types/nodemailer": "^8.0.2",
+    "@x402/hono": "2.29.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.3"
+  }
+}

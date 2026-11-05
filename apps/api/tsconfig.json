@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": [
+      "node",
+      "vitest/globals"
+    ],
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@pactagent/core": [
+        "../../packages/core/src/index.ts"
+      ],
+      "@pactagent/core/*": [
+        "../../packages/core/src/*"
+      ],
+      "@pactagent/node": [
+        "../../packages/node/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "test",
+    "scripts"
+  ]
+}
