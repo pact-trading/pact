@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "allowJs": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "src/*",
+        "../web/src/*"
+      ],
+      "@web/*": [
+        "../web/src/*"
+      ],
+      "@pact/core/*": [
+        "../../packages/core/src/*"
+      ],
+      "next/link": [
+        "src/shims/next-link.tsx"
+      ]
+    }
+  },
+  "include": [
+    "src"
+  ]
+}

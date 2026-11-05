@@ -1,0 +1,14 @@
+# 381MB of uncompressed source .glb files sit at the repo root. The versions the
+# site actually loads are Draco-compressed into public/models and total 9.4MB.
+# Uploading the originals on every build pays bandwidth and build time for bytes
+# no visitor ever downloads.
+/*.glb
+
+# Reference code copied in from elsewhere. Nothing imports it.
+ref/
+
+# Vercel runs its own build. A local dist/ only skews the result.
+dist/
+node_modules/
+
+docs/

@@ -1,0 +1,117 @@
+/* Styles for the Polar-style middle (PaySections + ../polar). */
+
+/* The card-free graphics draw in Pact lime: the light-rail look lives only here. */
+.pl-chapter {
+  --color-graphic-stroke: rgb(198, 255, 52);
+  --color-graphic-dim: rgba(198, 255, 52, 0.16);
+}
+
+/* Cards inside a window read as Polar's flat sheets: no own border or shadow, a 12px radius,
+ * and slightly denser than in the app. */
+.pl-sheets {
+  zoom: 0.9;
+}
+.pl-sheets section.rounded-2xl {
+  border-color: transparent;
+  border-radius: 12px;
+  box-shadow: none;
+  height: 100%;
+}
+.pl-sheets > *,
+.pl-sheets > * > .app-ui,
+.pl-sheets > .app-ui > * {
+  height: 100%;
+}
+
+/* Entrances: each part of a chapter fades up once the chapter arrives. Without JS or with
+ * reduced motion nothing is hidden. */
+@media (prefers-reduced-motion: no-preference) {
+  .pl-chapter:not([data-in]) > * {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  .pl-chapter > * {
+    transition:
+      opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1),
+      transform 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .pl-chapter > :nth-child(2) {
+    transition-delay: 0.12s;
+  }
+  .pl-chapter > :nth-child(3) {
+    transition-delay: 0.24s;
+  }
+}
+
+/* ---------- Line illustrations (How Pact works) ----------
+ * The only place the light-rail look is used: thin lime strokes, light running along them. */
+.ill {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ill-wire {
+  stroke: rgba(198, 255, 52, 0.38);
+  stroke-width: 1.4;
+}
+.ill-light {
+  stroke: #e4ff9a;
+  stroke-width: 2.2;
+  stroke-dasharray: 14 86;
+  stroke-dashoffset: 100;
+  filter: drop-shadow(0 0 4px #c6ff34) drop-shadow(0 0 10px rgba(198, 255, 52, 0.6));
+  animation: ill-run 2.8s linear infinite;
+}
+.ill-node {
+  stroke: rgba(198, 255, 52, 0.85);
+  stroke-width: 1.5;
+  fill: #0a0b07;
+}
+.ill-glow {
+  fill: rgba(198, 255, 52, 0.12);
+  animation: ill-breathe 2.8s ease-in-out infinite;
+}
+.ill-dot {
+  fill: #e4ff9a;
+  stroke: none;
+}
+.ill-core {
+  stroke: #c6ff34;
+  stroke-width: 1.8;
+  fill: rgba(198, 255, 52, 0.08);
+  filter: drop-shadow(0 0 14px rgba(198, 255, 52, 0.28));
+}
+.ill-mark {
+  stroke: #d9ff7a;
+  stroke-width: 2;
+}
+.ill-tick {
+  animation: ill-breathe 2.8s ease-in-out infinite;
+}
+@keyframes ill-run {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes ill-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ill-light {
+    display: none;
+  }
+  .ill-glow,
+  .ill-tick {
+    animation: none;
+  }
+}

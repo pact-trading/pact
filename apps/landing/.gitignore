@@ -1,0 +1,10 @@
+node_modules
+dist
+.vercel
+# Anchored: only the uncompressed source models at this directory's root.
+# public/models/*.glb are the Draco-compressed ones the site actually loads.
+/*.glb
+
+.env
+.env*
+!.env.example
