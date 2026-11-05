@@ -1,0 +1,238 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.theme-dark, .theme-dark *));
+
+/* Pact palette: raw colours per theme. Components use the semantic roles below. */
+:root,
+.theme-light {
+  --pact-logo-ink: #0b0d0e;
+  --pact-bg: #f3f4f6;
+  --pact-surface: #ffffff;
+  --pact-raised: #fafafb;
+  --pact-ink: #0e1116;
+  --pact-ink2: #3a404b;
+  --pact-muted: #646b78;
+  --pact-line: #e4e6ea;
+  --pact-line2: #eef0f3;
+  --pact-accent: #c6ff34;
+  --pact-accent-text: #0e1116;
+  --pact-accent-soft: #eef0f3;
+  --pact-on-accent: #0a0d02;
+  --pact-ok: #4d7c0f;
+  --pact-ok-soft: #ecfccb;
+  --pact-warn: #8a5800;
+  --pact-warn-soft: #fbf0d6;
+  --pact-bad: #b42318;
+  --pact-bad-soft: #fde7e4;
+  --pact-chip: #eef0f3;
+  --pact-field: #d3d6dc;
+  --pact-hero: #111111;
+  --pact-hero-muted: #c9c9c9;
+  --pact-hero-line: #333333;
+  --pact-shadow: 0 1px 2px rgba(14, 17, 22, 0.05), 0 8px 24px rgba(14, 17, 22, 0.06);
+  --pact-nav: rgba(255, 255, 255, 0.94);
+  --pact-pop: 0 10px 30px rgba(0, 0, 0, 0.12);
+  color-scheme: light;
+}
+.theme-dark {
+  --pact-logo-ink: #f4f2ec;
+  --pact-bg: #090909;
+  --pact-surface: #121212;
+  --pact-raised: #181818;
+  --pact-ink: #f2f3f5;
+  --pact-ink2: #c7cbd3;
+  --pact-muted: #8e95a2;
+  --pact-line: #262626;
+  --pact-line2: #1d1d1d;
+  --pact-accent: #c6ff34;
+  --pact-accent-text: #f2f3f5;
+  --pact-accent-soft: #1d1d1d;
+  --pact-on-accent: #0a0d02;
+  --pact-ok: #b5f23d;
+  --pact-ok-soft: #1a2309;
+  --pact-warn: #f0c060;
+  --pact-warn-soft: #2c2310;
+  --pact-bad: #ff8a7a;
+  --pact-bad-soft: #3a1512;
+  --pact-chip: #1d1d1d;
+  --pact-field: #333333;
+  --pact-hero: #161616;
+  --pact-hero-muted: #a3a3a3;
+  --pact-hero-line: #2c2c2c;
+  --pact-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02);
+  --pact-nav: rgba(18, 18, 18, 0.94);
+  --pact-pop: 0 10px 30px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
+:root,
+.theme-light,
+.theme-dark {
+  --background: var(--pact-bg);
+  --foreground: var(--pact-ink);
+  --card: var(--pact-surface);
+  --card-foreground: var(--pact-ink);
+  --raised: var(--pact-raised);
+  --primary: var(--pact-accent);
+  --primary-foreground: var(--pact-on-accent);
+  --muted: var(--pact-raised);
+  --muted-foreground: var(--pact-muted);
+  --subtle-foreground: var(--pact-ink2);
+  --accent: var(--pact-accent-soft);
+  --accent-foreground: var(--pact-accent-text);
+  --chip: var(--pact-chip);
+  --success: var(--pact-ok);
+  --success-soft: var(--pact-ok-soft);
+  --warning: var(--pact-warn);
+  --warning-soft: var(--pact-warn-soft);
+  --destructive: var(--pact-bad);
+  --destructive-soft: var(--pact-bad-soft);
+  --ink: var(--pact-hero);
+  --ink-foreground: var(--pact-hero-muted);
+  --ink-line: var(--pact-hero-line);
+  --border: var(--pact-line);
+  --border-subtle: var(--pact-line2);
+  --input: var(--pact-field);
+  --ring: var(--pact-muted);
+  --nav: var(--pact-nav);
+  --radius: 1rem;
+  --scrollbar-thumb: var(--pact-field);
+  --scrollbar-thumb-hover: var(--pact-muted);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-raised: var(--raised);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-chip: var(--chip);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-destructive: var(--destructive);
+  --color-destructive-soft: var(--destructive-soft);
+  --color-ink: var(--ink);
+  --color-ink-foreground: var(--ink-foreground);
+  --color-ink-line: var(--ink-line);
+  --color-border: var(--border);
+  --color-border-subtle: var(--border-subtle);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-nav: var(--nav);
+
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, monospace;
+
+  --radius-sm: calc(var(--radius) - 0.5rem);
+  --radius-md: calc(var(--radius) - 0.25rem);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 0.125rem);
+  --radius-2xl: calc(var(--radius) + 0.5rem);
+
+  --shadow-panel: var(--pact-shadow);
+  --shadow-pop: var(--pact-pop);
+
+  --animate-fade-in: fade-in 180ms ease-out both;
+  --animate-rise-in: rise-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  --animate-sheet-in: sheet-in 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes rise-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+  @keyframes sheet-in {
+    from {
+      opacity: 0;
+      transform: translateY(100%);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+    scrollbar-width: thin;
+  }
+  html {
+    @apply bg-background;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply m-0 min-w-80 bg-background font-sans text-foreground antialiased;
+    font-size: 16px;
+    line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum', 'cv11';
+  }
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.02em;
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+  button:not(:disabled) {
+    @apply cursor-pointer;
+  }
+  a,
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+  code,
+  kbd,
+  pre {
+    @apply font-mono;
+  }
+  ::selection {
+    background: var(--pact-accent);
+    color: var(--pact-on-accent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--pact-ink);
+    outline-offset: 2px;
+  }
+  .theme-dark :focus-visible {
+    outline-color: var(--pact-accent);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
