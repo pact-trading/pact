@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="288 80 530 96" role="img" aria-labelledby="title desc" color="#F4F2EC">
+  <title id="title">Pact</title>
+  <desc id="desc">Pact custom uppercase wordmark.</desc>
+  <g fill="currentColor">
+    <path d="M288 80h72c25.4 0 40 14.6 40 36s-14.6 36-40 36h-44v24h-28V80Zm28 24v24h42c9.1 0 14-4 14-12s-4.9-12-14-12h-42Z" fill-rule="evenodd"/>
+    <path d="m410 176 45-96h30l45 96h-30l-30-70-30 70h-30Z"/>
+    <path d="M566 80h92v24h-84c-6.6 0-12 5.4-12 12v24c0 6.6 5.4 12 12 12h84v24h-92c-17.7 0-32-14.3-32-32v-32c0-17.7 14.3-32 32-32Z"/>
+    <path transform="translate(20)" d="M674 80h112c6.6 0 12 5.4 12 12v12h-48v72h-28v-72h-60V92c0-6.6 5.4-12 12-12Z"/>
+  </g>
+</svg>

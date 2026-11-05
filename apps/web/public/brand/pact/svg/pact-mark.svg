@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc" color="#0B0D0E">
+  <title id="title">Pact Soft Gate symbol</title>
+  <desc id="desc">Four equal voices arranged around one shared policy core.</desc>
+  <defs>
+    <path id="module" d="M136 0h32c13.3 0 24 10.7 24 24v72c0 22.1-17.9 40-40 40h-4c-6.6 0-12 5.4-12 12v4c0 22.1-17.9 40-40 40H24c-13.3 0-24-10.7-24-24v-24c0-26.5 21.5-48 48-48h16c17.7 0 32-14.3 32-32V48c0-26.5 17.5-48 40-48Z"/>
+  </defs>
+  <g fill="currentColor">
+    <use href="#module" transform="translate(16 16) scale(.5520833333)"/>
+    <g transform="rotate(90 128 128)"><use href="#module" transform="translate(16 16) scale(.5520833333)"/></g>
+    <g transform="rotate(180 128 128)"><use href="#module" transform="translate(16 16) scale(.5520833333)"/></g>
+    <g transform="rotate(270 128 128)"><use href="#module" transform="translate(16 16) scale(.5520833333)"/></g>
+  </g>
+</svg>
