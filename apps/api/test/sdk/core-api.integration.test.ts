@@ -1,0 +1,126 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import { keccak256, toHex } from 'viem';
+import { PactClient, fetchTransport, mandateTypedData } from '@pactagent/core';
+import { apiFixture, signedCall, signer, subscription, Indexer, APPROVER, USDT, escrow } from './api-fixture.js';
+const fixtures: ReturnType<typeof apiFixture>[] = [];
+function fixture(autoSettle = true, approval = false) {
+  const f = apiFixture(autoSettle, approval); fixtures.push(f);
+  return { ...f, client: new PactClient({ apiKey: f.keys.secretKey, transport: fetchTransport('http://sdk.test', f.fetcher) }) };
+}
+afterEach(() => { for (const f of fixtures.splice(0)) f.close(); });
+describe('core against the real in-process API', () => {
+  it('captures, partially refunds and fully refunds using signed payloads without bigint loss', async () => {
+    const f = fixture(); const c = f.client;
+    expect(await c.config.get()).toMatchObject({ chainId: 1874, merchant: signer.address, escrow });
+    const p = await c.payments.create({ amount: '2', description: 'SDK' }, { idempotencyKey: 'sdk-payment' });
+    expect((await c.payments.create({ amount: '2', description: 'SDK' }, { idempotencyKey: 'sdk-payment' })).id).toBe(p.id);
+    expect(p).toMatchObject({ amount: '2.000000', status: 'pending', financialStatus: 'open' });
+    const call = await signedCall(p.id, 9007199254740993n);
+    const sent = await c.intents.create(call);
+    expect(f.chain.sent[0].request.intent.nonce).toBe(9007199254740993n);
+    expect(JSON.parse(f.requests.find(r => r.url === '/v1/intents')!.body!).intent.nonce).toBe('9007199254740993');
+    expect(await c.intents.create(call)).toMatchObject({ id: sent.id, status: 'confirmed', txHash: sent.txHash });
+    expect(f.chain.sent).toHaveLength(1);
+    expect(await c.payments.get(p.id)).toMatchObject({ status: 'succeeded', financialStatus: 'captured', captured: '2.000000', refunded: '0.000000' });
+    expect((await c.payments.list()).data[0].status).toBe('captured');
+    const refund = await c.payments.refund(p.id, { amount: '1', reason: 'Customer request', ...await signedCall(p.id, 2n, 'refund', 1_000_000n) });
+    expect(refund.status).toBe('pending'); // submission response, even if FakeChain already settled
+    expect((await c.refunds.list()).data[0]).toMatchObject({ id: refund.id, status: 'succeeded', amount: '1.000000' });
+    expect(await c.payments.get(p.id)).toMatchObject({ status: 'succeeded', financialStatus: 'partially_refunded', captured: '2.000000', refunded: '1.000000' });
+    await c.payments.refund(p.id, { ...await signedCall(p.id, 3n, 'refund', 1_000_000n) });
+    expect(await c.payments.get(p.id)).toMatchObject({ status: 'refunded', financialStatus: 'refunded', refunded: '2.000000' });
+    await expect(c.payments.refund(p.id, { amount: '1', ...await signedCall(p.id, 4n, 'refund', 1_000_000n) })).rejects.toMatchObject({ status: 422, code: 'refund_limit' });
+    expect((await c.refusals.list()).data[0].reason).toBe('refund_limit');
+    expect(typeof (await c.gasTank.get()).balanceWei).toBe('string');
+    expect((await c.export()).totals).toMatchObject({ grossUSDT: '0.000000', feesUSDT: '0.030000', netUSDT: '-0.030000' });
+    expect(await c.export({ format: 'csv' })).toContain('Payment or Invoice ID');
+  });
+  it('preserves invoice draft/send/partial payment and settlement workflows', async () => {
+    const c = fixture().client;
+    const invoice = await c.invoices.create({ customerEmail: 'buyer@example.test', lines: [{ description: 'Service', unitAmount: '3', quantity: 1 }], status: 'draft', allowPartial: true, metadata: { order: 'sdk' } });
+    expect(invoice).toMatchObject({ status: 'draft', amount: '3.000000', paid: '0.000000' });
+    expect((await c.invoices.send(invoice.id)).status).toBe('sent');
+    const p = await c.invoices.createPayment(invoice.id, { amount: '1' });
+    expect(p.invoiceId).toBe(invoice.id);
+    await c.intents.create(await signedCall(p.id, 1n, 'charge', 1_000_000n));
+    expect(await c.invoices.get(invoice.id)).toMatchObject({ status: 'partially_paid', paid: '1.000000', remaining: '2.000000' });
+    const remainder = await c.invoices.createPayment(invoice.id);
+    await c.intents.create(await signedCall(remainder.id, 2n));
+    expect((await c.invoices.list()).data[0]).toMatchObject({ id: invoice.id, status: 'paid', paid: '3.000000', remaining: '0.000000' });
+  });
+  it('registers a V1 mandate, reads nonce/plans, rejects unconfigured renewal and submits signed cancellation', async () => {
+    const c = fixture().client;
+    const plan = await c.subscriptions.createPlan({ name: 'Daily', amount: '2', periodSeconds: 86400, maxPeriods: 12 });
+    expect(await c.subscriptions.getPlan(plan.id)).toEqual(plan);
+    expect((await c.subscriptions.listPlans()).data).toEqual([plan]);
+    const nonce = await c.subscriptions.nonce(signer.address);
+    expect(nonce.nonce).toBe('0');
+    const mandate = { payer: signer.address, merchant: signer.address, planId: keccak256(toHex(plan.id)), amountCap: 2_000_000n, periodSeconds: 86400n, maxPeriods: 12, endTime: BigInt(Math.floor(Date.now()/1000) + 86400 * 13), nonce: BigInt(nonce.nonce) };
+    const sub = await c.subscriptions.create({ planId: plan.id, mandate, signature: await signer.signTypedData(mandateTypedData(mandate, subscription)) });
+    expect(sub).toMatchObject({ status: 'active' });
+    expect((await c.subscriptions.nonce(signer.address)).nonce).toBe('1');
+    await expect(c.subscriptions.renew(sub.id)).rejects.toMatchObject({ status: 422, code: 'automatic_funded_renewal_disabled' });
+    expect(await c.subscriptions.renewalStatus(sub.id)).toMatchObject({ id: sub.id, state: 'disabled' });
+    expect((await c.subscriptions.cancel(sub.id, await signedCall(sub.chainId, 2n, 'cancel'))).status).toBe('submitted');
+    expect((await c.subscriptions.list()).data[0].status).toBe('cancelled');
+  });
+  it.each(['missing', 'reverted', 'no-event'] as const)('reports %s charge receipts without inventing captured amounts', async mode => {
+    const f = fixture(false), c = f.client;
+    const p = await c.payments.create({ amount: '2' });
+    const sent = await c.intents.create(await signedCall(p.id, 1n));
+    expect(sent.status).toBe('submitted');
+    if (mode !== 'missing') f.chain.receipts.set(sent.txHash!, { txHash: sent.txHash!, block: 1n, status: mode === 'reverted' ? 'reverted' : 'success', events: [] });
+    f.chain.block = 3n;
+    await new Indexer(f.db, f.chain).poll();
+    expect(await c.payments.get(p.id)).toMatchObject({ status: mode === 'reverted' ? 'failed' : 'pending', captured: '0.000000', refunded: '0.000000', financialStatus: mode === 'missing' ? 'open' : mode === 'reverted' ? 'failed' : 'reconciliation_required' });
+  });
+  it('serializes signed EIP-7702 approval, remains pending without receipt and checks current allowance', async () => {
+    const f = fixture(false, true), c = f.client;
+    const p = await c.payments.create({ amount: '2' });
+    const ready = await c.payments.getApproval(p.id, signer.address);
+    expect(ready).toMatchObject({ status: 'needs_approval', amount: '2000000', balance: '10000000', authorizationNonce: '0' });
+    const authorization = await signer.signAuthorization({ address: ready.delegate, chainId: 1874, nonce: Number(ready.authorizationNonce) });
+    const pending = await c.payments.approve(p.id, { payer: signer.address, approvalNonce: BigInt(ready.approvalNonce!), deadline: BigInt(ready.deadline!), signature: await signer.signMessage({ message: { raw: ready.message! } }), authorization });
+    expect(pending.status).toBe('pending');
+    expect(JSON.parse(f.requests.at(-1)!.body!).authorization).not.toHaveProperty('v');
+    expect((await c.payments.getApproval(p.id, signer.address)).status).toBe('pending');
+    f.chain.approval.receipts.set(pending.txHash!, { hash: pending.txHash!, block: 10n, status: 'success', approvals: [{ payer: signer.address, token: USDT, spender: escrow, amount: 2_000_000n, nonce: 0n }] });
+    f.chain.block = 12n;
+    Object.assign(f.chain.approval.state, { code: `0xef0100${APPROVER.slice(2)}`, allowance: 2_000_000n, approvalNonce: 1n });
+    expect((await c.payments.getApproval(p.id, signer.address)).status).toBe('ready');
+    f.chain.approval.state.allowance = 0n;
+    expect((await c.payments.getApproval(p.id, signer.address)).status).not.toBe('ready');
+    expect(f.chain.approval.broadcasts).toHaveLength(1);
+  });
+  it('covers payment links, dashboard, webhook queues and key administration without delivery', async () => {
+    const f = fixture(), c = f.client;
+    const link = await c.paymentLinks.create({ kind: 'product', name: 'Service', amount: '2' });
+    expect((await c.paymentLinks.get(link.id)).visits).toBe(1);
+    expect((await c.paymentLinks.list()).data[0]).toMatchObject({ id: link.id, amount: '2.000000' });
+    const tip = await c.paymentLinks.create({ kind: 'tip', name: 'Tips' });
+    expect(tip.amount).toBeNull();
+    expect(await c.paymentLinks.deactivate(link.id)).toMatchObject({ status: 'inactive' });
+    await expect(c.paymentLinks.get(link.id)).rejects.toMatchObject({ status: 410, code: 'payment_link_inactive' });
+    expect(await c.dashboard.get()).toMatchObject({ timeZone: 'UTC', metrics: { capturedUsdt: '0.000000' } });
+    const config = await c.webhooks.configure({ url: 'https://merchant.example.test/webhook' }, { idempotencyKey: 'webhook-config' });
+    expect(config.signingSecret).toMatch(/^whsec_/);
+    const event = await c.webhooks.test();
+    expect((await c.webhooks.events()).data[0]).toMatchObject({ id: event.eventId, type: 'webhook.test' });
+    expect((await c.webhooks.deliveries()).data[0]).toMatchObject({ event_id: event.eventId, status: 'pending', attempt: 0, last_http_status: null });
+    expect(await c.webhooks.replay(event.eventId)).toEqual({ queued: true });
+    const key = await c.apiKeys.create({ kind: 'publishable' });
+    const pub = new PactClient({ apiKey: key.key, transport: fetchTransport('http://sdk.test', f.fetcher) });
+    expect((await pub.config.get()).chainId).toBe(1874);
+    await c.apiKeys.revoke(key.id);
+    await expect(pub.config.get()).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+  });
+  it('retains disabled readiness and API secret-key errors', async () => {
+    const f = fixture(), c = f.client;
+    const p = await c.payments.create({ amount: '2' });
+    expect(await c.payments.getApproval(p.id, signer.address)).toMatchObject({ status: 'unavailable', reason: 'feature_disabled', amount: '2000000' });
+    const pub = new PactClient({ apiKey: f.keys.publishableKey, transport: fetchTransport('http://sdk.test', f.fetcher) });
+    expect((await pub.payments.get(p.id)).id).toBe(p.id);
+    await expect(pub.payments.getApproval(p.id, signer.address)).rejects.toMatchObject({ status: 403 });
+    await expect(pub.payments.list()).rejects.toMatchObject({ status: 403 });
+  });
+});
