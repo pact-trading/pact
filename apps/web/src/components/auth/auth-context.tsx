@@ -1,7 +1,7 @@
 'use client';
 
 import { createContext, useContext } from 'react';
-import type { Address, Hex, WalletClient } from 'viem';
+import type { Address, WalletClient } from 'viem';
 import type { LiveConfig, MerchantWalletKind } from '@/lib/live-wallet';
 import type { SignRequest } from '@/server/data/types';
 
@@ -20,10 +20,6 @@ export interface PactAuth {
   live?: LiveAuth;
 }
 
-export interface CustomerApproval {
-  signature: Hex;
-  authorization?: { address: Hex; chainId: number; nonce: number; r: Hex; s: Hex; yParity?: number };
-}
 export interface LiveAuth {
   config: LiveConfig;
   merchant: { address: Address; kind: MerchantWalletKind | null } | null;
@@ -36,10 +32,8 @@ export interface LiveAuth {
   connectWallet(role: 'investor' | 'compliance', kind: MerchantWalletKind): Promise<void>;
   signInCustomer(kind: 'privy' | 'local', email?: string): void | Promise<void>;
   signOut(role: 'merchant' | 'customer' | 'investor' | 'compliance'): Promise<void>;
-  /** A client for the merchant's own transactions: tank deposit, daily cap, approvals, swaps. */
+  /** The merchant's wallet. It only signs: Pact's relayer sends every transaction, so it needs no WBT. */
   merchantWallet(): Promise<WalletClient>;
-  /** The customer's one-time USDT approval: a raw digest and, the first time, an EIP-7702 authorization. */
-  approveAsCustomer(message: Hex, delegate: Hex | null, nonce: number | null): Promise<CustomerApproval>;
 }
 
 export const unconfiguredAuth: PactAuth = {

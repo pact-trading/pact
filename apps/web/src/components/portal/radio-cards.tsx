@@ -5,7 +5,7 @@ import { cn } from '@/lib/cn';
 
 /**
  * A choice between a few options, as native radio buttons in bordered cards, so arrow keys,
- * labels and screen readers work without extra code. Matches the gas policy picker.
+ * labels and screen readers work without extra code.
  */
 export function RadioCards<T extends string>({
   legend,

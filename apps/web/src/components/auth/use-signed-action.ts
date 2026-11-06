@@ -3,7 +3,6 @@
 import { useCallback } from 'react';
 import type { ActionResult } from '@/server/actions/result';
 import type { SignRequest } from '@/server/data/types';
-import type { Hex } from 'viem';
 import { continueSigned, submitApproval } from '@/server/actions/customer';
 import { SignatureCancelled, usePactAuth } from './auth-context';
 
@@ -24,13 +23,11 @@ export function useSignedAction() {
       if (!prepared.ok) return prepared;
       let signature: string;
       try {
-        // A first payment carries the one-time USDT approval: sign it, let the relayer send it,
-        // then sign the payment itself. The customer confirms once.
+        // A first payment carries the one-time USDT permit: sign it, let Pact's relayer submit it,
+        // then sign the payment itself. The customer confirms once and pays no gas.
         if (prepared.data.approval) {
-          if (!auth.live) throw new Error('This payment needs an approval that only live mode can collect.');
-          const { message, delegate, nonce } = prepared.data.approval;
-          const approval = await auth.live.approveAsCustomer(message as Hex, delegate as Hex | null, nonce);
-          prepared = await submitApproval(prepared.data.token, approval);
+          const permit = await auth.sign({ ...prepared.data, typedData: prepared.data.approval.typedData, approval: undefined, also: undefined });
+          prepared = await submitApproval(prepared.data.token, { signature: permit });
           if (!prepared.ok) return prepared;
         }
         signature = await auth.sign(prepared.data);

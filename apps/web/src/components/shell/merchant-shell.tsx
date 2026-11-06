@@ -13,7 +13,6 @@ import {
   IconDiscount2,
   IconFileExport,
   IconFileInvoice,
-  IconGasStation,
   IconHome,
   IconLayoutSidebarLeftExpand,
   IconLink,
@@ -22,6 +21,7 @@ import {
   IconPlayerPlay,
   IconPlus,
   IconReceiptRefund,
+  IconReceiptTax,
   IconRepeat,
   IconRobot,
   IconSearch,
@@ -111,7 +111,13 @@ const groups: Array<{ label: string | null; items: NavItem[] }> = [
   {
     label: 'Money',
     items: [
-      { href: '/dashboard/gas-tank', label: 'Gas tank', icon: IconGasStation, keywords: 'wbt sponsor fee' },
+      {
+        href: '/dashboard/fees',
+        label: 'Fees',
+        icon: IconReceiptTax,
+        accountant: true,
+        keywords: 'pricing rate terms permit refund net',
+      },
       { href: '/dashboard/security', label: 'Security', icon: IconShieldCheck, keywords: 'drain relayer' },
       {
         href: '/dashboard/exports',

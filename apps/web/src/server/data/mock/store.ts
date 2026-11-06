@@ -9,8 +9,6 @@ import type {
   AgentSession,
   ApiKey,
   DrainRun,
-  GasLedgerEntry,
-  GasPolicy,
   InvoiceActivity,
   InvoiceReminder,
   OnboardingStep,
@@ -40,8 +38,6 @@ export interface MerchantRecord {
   accountantName: string;
   accountantEmail: string;
   settings: MerchantSettings;
-  /** Pact fee per payment, in basis points. */
-  feeBps: number;
   /** Pact fee per x402 settlement, in USDT base units. */
   agentFeeMinor: bigint;
   usdtMinor: bigint;
@@ -66,8 +62,8 @@ export interface OrderRecord {
   order: Order;
   payerAddress: Address | null;
   txHash: Hex | null;
+  /** Pact's fee, taken out of the payment. */
   feeMinor: bigint;
-  gasWei: bigint;
   paidAt: number | null;
   refunds: RefundEntry[];
   activity: OrderActivity[];
@@ -162,10 +158,36 @@ export interface AccountingEntry {
   orderId: string | null;
   customer: string;
   grossMinor: bigint;
+  /** Pact's fee on this entry; on a `Fee` entry, a refund's network fee. */
   feeMinor: bigint;
-  gasWei: bigint;
   refundOf: string | null;
   txHash: Hex | null;
+}
+
+/** What Pact's relayer sends on someone's behalf. Pact pays the gas. */
+export type RelayedAction =
+  | 'payment'
+  | 'refund'
+  | 'subscribe'
+  | 'renewal'
+  | 'cancel'
+  | 'invoice_acknowledge'
+  | 'account_setup'
+  | 'agent_settlement'
+  | 'fee_terms'
+  | 'permit';
+
+/** One transaction Pact's relayer sent. */
+export interface RelayedTx {
+  id: string;
+  createdAt: string;
+  action: RelayedAction;
+  /** Who signed it. */
+  payer: string;
+  objectId: string;
+  label: string;
+  gasWei: string;
+  txHash: Hex;
 }
 
 export interface PendingSignature {
@@ -182,7 +204,7 @@ export interface MockStore {
   /** Demo time at the moment `realBase` was taken; now() advances with wall-clock time. */
   clock: { base: number; realBase: number; offsetDays: number };
   merchant: MerchantRecord;
-  /** A second merchant so per-merchant isolation (tank, allowlists) is visible. */
+  /** A second merchant so per-merchant isolation (fee terms, allowlists) is visible. */
   otherMerchant: { name: string; address: Address };
   products: Product[];
   customers: CustomerRecord[];
@@ -191,14 +213,17 @@ export interface MockStore {
   plans: PlanRecord[];
   subscriptions: SubscriptionRecord[];
   refusals: RefusalEvent[];
-  gas: {
-    balanceWei: bigint;
-    dailyCapWei: bigint;
-    policy: GasPolicy;
-    ledger: GasLedgerEntry[];
-    faucetClaimedAt: number | null;
-    wbtUsdMinor: bigint;
+  /** Pact's fee terms as this merchant signed them, and its standing USDT permits. */
+  fees: {
+    /** The FeeSchedule version the merchant signed; 0 until it signs, and Pact cannot take its payments. */
+    acceptedVersion: number;
+    /** Refunds from the merchant's wallet (escrow) and a refund's network fee in USDT (Router). */
+    permits: { escrow: boolean; router: boolean };
+    /** USDT base units per 1 WBT: the FeeSchedule's price for a refund's network fee. */
+    usdtPerWbtMinor: bigint;
   };
+  /** Every transaction Pact's relayer sent in this sandbox, newest first. */
+  relayed: RelayedTx[];
   agents: AgentRecord[];
   agentCalls: AgentCall[];
   endpoints: PaidEndpoint[];
@@ -358,7 +383,7 @@ export const hooks = {
       record: InvoiceRecord,
       c: CustomerRecord,
       amount: bigint,
-    ) => { txHash: Hex; feeMinor: bigint; gasWei: bigint } | null
+    ) => { txHash: Hex; feeMinor: bigint } | null
   >,
   /** After an invoice payment is recorded; `amount` is in USDT base units. */
   invoicePaid: [] as Array<(s: MockStore, record: InvoiceRecord, amount: bigint) => void>,

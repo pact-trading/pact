@@ -2,9 +2,9 @@
 
 import type { CheckoutField } from '@pactagent/core/checkout-fields';
 import { revalidatePath } from 'next/cache';
-import type { InvoiceRequest, MerchantSettingsUpdate, SubscriptionPlanRequest } from '@pactagent/core/api-types';
+import type { InvoiceRequest, MerchantSettingsUpdate, MerchantSpender, SubscriptionPlanRequest } from '@pactagent/core/api-types';
 import type { Product } from '@pactagent/core/commerce-types';
-import type { ApiKey, GasPolicy } from '@pactagent/core/platform-types';
+import type { ApiKey } from '@pactagent/core/platform-types';
 import { getData } from '../data';
 import { merchantApi, SessionError } from '../api-client';
 import { DataError } from '../data/errors';
@@ -53,9 +53,14 @@ export const createPlan = async (input: SubscriptionPlanRequest & { description?
   done(async () => (await merchant()).createPlan(input));
 export const runRenewal = async (id: string) => done(async () => (await merchant()).runRenewal(id));
 
-export const updateGasPolicy = async (update: Partial<GasPolicy>) =>
-  done(async () => (await merchant()).updateGasPolicy(update));
-export const claimFaucet = async () => done(async () => (await merchant()).claimFaucet());
+// Fees: the terms are signed once, then the two standing permits, one after the other.
+export const prepareAcceptTerms = async () => attempt(async () => (await merchant()).prepareAcceptTerms());
+export const submitAcceptTerms = async (token: string, signature: string) =>
+  done(async () => (await merchant()).submitAcceptTerms(token, signature));
+export const preparePermit = async (spender: MerchantSpender) =>
+  attempt(async () => (await merchant()).preparePermit(spender));
+export const submitPermit = async (token: string, signature: string) =>
+  done(async () => (await merchant()).submitPermit(token, signature));
 export const runDrainSimulation = async () => done(async () => (await merchant()).runDrainSimulation());
 
 export const createApiKey = async (input: { name: string; kind: ApiKey['kind'] }) =>
@@ -68,11 +73,9 @@ export const replayWebhook = async (eventId: string) =>
   done(async () => (await merchant()).replayWebhook(eventId));
 export const sendTestWebhook = async () => done(async () => (await merchant()).sendTestWebhook());
 
-// Merchant polish: preferences, gas deposits, written reminders and subscription controls.
+// Merchant polish: preferences, written reminders and subscription controls.
 export const updatePreferences = async (update: Partial<MerchantPreferences>) =>
   done(async () => (await merchant()).updatePreferences(update));
-export const depositGas = async (amountWei: string) =>
-  done(async () => (await merchant()).depositGas(amountWei));
 export const sendReminder = async (id: string, input: { message: string; sendAt: string | null }) =>
   done(async () => (await merchant()).sendReminder(id, input));
 export const cancelReminder = async (id: string, reminderId: string) =>

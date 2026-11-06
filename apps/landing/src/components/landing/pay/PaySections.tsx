@@ -8,10 +8,10 @@
 import { useState, type CSSProperties } from 'react';
 import {
   IconFileInvoice,
-  IconGasStation,
   IconLink,
   IconLock,
   IconReceiptRefund,
+  IconReceiptTax,
   IconRepeat,
   IconRobot,
   IconShoppingCart,
@@ -98,7 +98,7 @@ const features = [
   ['Refunds', IconReceiptRefund],
   ['Webhooks', IconWebhook],
   ['Agent payments', IconRobot],
-  ['Gas tank', IconGasStation],
+  ['One fee', IconReceiptTax],
   ['Customer portal', IconUserCircle],
 ] as const;
 
@@ -127,10 +127,10 @@ function Contents() {
 /* ---------- The page ---------- */
 
 const faqs = [
-  ['Do my customers need a wallet?', 'No. They sign in with an email or a passkey and pay. Pact pays the gas from your tank.'],
+  ['Do my customers need a wallet?', 'No. They sign in with an email or a passkey and pay. They never pay a fee or gas.'],
   ['Which chain and token?', 'USDT on Whitechain. Today Pact runs on the Whitechain testnet.'],
   ['How are subscriptions kept safe?', 'The customer signs a price cap and a period once. The contract refuses any renewal above the cap or too early.'],
-  ['What does the gas cost me?', 'You fund a tank in WBT. About 0.2 WBT covers a thousand payments, and a daily cap stops it from draining.'],
+  ['What does Pact cost?', 'One fee, taken from each payment: 0.8% of a checkout payment, at least 0.15 USDT, and 0.5% of an invoice, at most 10 USDT. You sign the terms once. There is no gas to buy: Pact pays it, and nobody holds WBT.'],
   ['Can I refund a payment?', 'Yes. Full or partial, in one click. The refund is public on the explorer.'],
   ['How do agents pay?', 'Put an x402 price on an API route. Agents pay per call in USDT, within the caps their owner sets.'],
 ];
@@ -194,7 +194,7 @@ export function PolarSections() {
         subtitle="with every step on the record"
         description="Every payment goes through Pact's router on Whitechain. Checks run onchain, USDT settles in one block, and a signed webhook follows."
       >
-        <Screen flow={3} src="/landing/app/order.webp" alt="An order in the Pact dashboard: receipt, fee, gas and onchain timeline" />
+        <Screen flow={3} src="/landing/app/order.webp" alt="An order in the Pact dashboard: receipt, fee, net and onchain timeline" />
       </Chapter>
 
       <Chapter
@@ -208,17 +208,16 @@ export function PolarSections() {
       </Chapter>
 
       <Chapter
-        id="gas"
-        name="05 Gas tank"
-        title="You pay the gas"
-        subtitle="eight limits keep it from draining"
-        description="Fund one tank in WBT. About 0.2 WBT covers a thousand payments, and five of the eight limits live in the contracts."
+        id="fees"
+        name="05 Fees"
+        title="One fee, from the payment"
+        subtitle="and no gas for anyone"
+        description="Pact takes 0.8% of each checkout payment, at least 0.15 USDT, and 0.5% of each invoice, at most 10 USDT, out of the payment itself. You sign the terms once. Pact pays the gas, so neither you nor your customers ever hold WBT."
       >
-        <Screen flow={5} src="/landing/app/gas-tank.webp" alt="The gas tank: balance, runway and daily sponsored spend" />
         <GraphicCardGrid
           cards={[
-            { title: 'Replays refused', desc: 'The same signature sent twice is refused before any gas is spent.', Graphic: RadialSpinner },
-            { title: 'A daily cap', desc: 'The tank stops at its cap, so spam can never drain it.', Graphic: GaugeSweep },
+            { title: 'Paid net', desc: 'A 100 USDT checkout payment reaches you as 99.20 USDT, in the same block.', Graphic: GaugeSweep },
+            { title: 'Only you spend your money', desc: 'A refund runs only when you sign it. Anyone else’s call is refused before it is sent.', Graphic: RadialSpinner },
             { title: 'Dust refused', desc: 'Payments under the minimum never reach the chain.', Graphic: SteppedRadial },
           ]}
         />

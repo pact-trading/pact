@@ -4,7 +4,8 @@
 // - The customer is the Privy app's test account, read from Privy with the app credentials in apps/api/.env.local.
 // - Funds come from the deployer in .env.testnet, topped up only to what a flow needs.
 // The merchant key is generated once and kept in .runtime/testnet/live-check.json (gitignored), so every
-// flow reuses one funded merchant and gas tank instead of setting up a new one each time.
+// flow reuses one merchant, with its fee terms and permits signed, instead of setting up a new one each time.
+// The merchant wallet only signs: Pact's relayer sends its transactions, so it never needs WBT.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +17,6 @@ import {
   formatUnits,
   http,
   parseAbi,
-  parseEther,
 } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
@@ -97,21 +97,6 @@ const wait = async hash => {
   if (r.status !== 'success') throw new Error(`transaction failed: ${hash}`);
   return r;
 };
-
-/** The merchant wallet holds at least `wbt`; the deployer sends the difference plus a little gas. */
-export async function topUpMerchant(wbt) {
-  const have = await pub.getBalance({ address: merchant.address });
-  const want = parseEther(wbt);
-  if (have >= want) return;
-  await wait(
-    await funder.sendTransaction({
-      to: merchant.address,
-      value: want - have + parseEther('0.01'),
-      type: 'legacy',
-    }),
-  );
-  console.log(`  (deployer → merchant ${formatEther(want - have + parseEther('0.01'))} WBT)`);
-}
 
 /** `address` holds at least `usdt` USDT: the deployer swaps WBT on the testnet DEX, paid to it. */
 export async function topUpUsdt(address, usdt) {

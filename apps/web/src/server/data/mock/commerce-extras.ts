@@ -18,7 +18,7 @@ import type {
   PaymentLinkState,
   RefundListItem,
 } from '../parts/commerce';
-import { customer as customerRecord, payOrder, plan as planRecord, USDT } from './engine';
+import { customer as customerRecord, MIN_AMOUNT_MINOR, payOrder, plan as planRecord, USDT } from './engine';
 import type { MockKit } from './source';
 import {
   DAY,
@@ -82,7 +82,7 @@ export function mockDiscount(s: MockStore, code: string | undefined, gross: bigi
   if (row.maxRedemptions !== null && row.redemptions >= row.maxRedemptions) throw new DataError('discount_exhausted', 'That discount code has reached its limit.', 400);
   const discount = row.kind === 'percent' ? (gross * BigInt(row.value) + 5_000n) / 10_000n : BigInt(row.value) > gross ? gross : BigInt(row.value);
   const net = gross - discount;
-  if (net < BigInt(s.gas.policy.minimumAmountMinor)) throw new DataError('discount_below_minimum', 'This discount brings the price below the minimum.', 400);
+  if (net < MIN_AMOUNT_MINOR) throw new DataError('discount_below_minimum', 'This discount brings the price below the minimum.', 400);
   return { gross, net, discount, code: row.code };
 }
 export function redeemMockDiscount(s: MockStore, code: string | null) {
@@ -96,8 +96,8 @@ const TIP_SUGGESTIONS = [USDT(5), USDT(10), USDT(25)];
 const MAX_LINES = 20;
 const CHECKOUT_MINUTES = 30;
 
-/** The relayer refuses sponsored payments below the gas policy's minimum ("dust"). */
-const minimum = (s: MockStore) => BigInt(s.gas.policy.minimumAmountMinor);
+/** The Router refuses payments below its minimum amount ("dust"). */
+const minimum = (_s: MockStore) => MIN_AMOUNT_MINOR;
 const dollars = (minor: bigint) =>
   `$${(minor / 1_000_000n).toLocaleString('en-US')}.${((minor % 1_000_000n) / 10_000n).toString().padStart(2, '0')}`;
 
@@ -173,7 +173,6 @@ function newOrder(
     payerAddress: null,
     txHash: null,
     feeMinor: 0n,
-    gasWei: 0n,
     paidAt: null,
     refunds: [],
     activity: [{ type: 'order.created', at, detail: input.detail, txHash: null }],
@@ -424,7 +423,7 @@ export function seedCommerceExtras(s: MockStore): CommerceExtrasState {
   newestFirst(s.orders, o => o.order.createdAt);
   newestFirst(s.webhookEvents, e => e.created_at);
   newestFirst(s.webhookDeliveries, d => d.next_at);
-  newestFirst(s.gas.ledger, g => g.createdAt);
+  newestFirst(s.relayed, g => g.createdAt);
   return state;
 }
 

@@ -7,8 +7,8 @@ import {
   IconDownload,
   IconFileInvoice,
   IconFilePlus,
-  IconGasStation,
   IconLink,
+  IconReceiptTax,
   IconWallet,
 } from '@tabler/icons-react';
 import { InvoiceStatusChip } from '@/components/merchant/invoices/invoice-status';
@@ -17,12 +17,11 @@ import { BarChart } from '@/components/ui/bar-chart';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
-import { Gauge } from '@/components/ui/gauge';
 import { PageHeader } from '@/components/ui/page-header';
 import { Stat, StatGrid } from '@/components/ui/stat';
 import { Table, Td, Th, Tr } from '@/components/ui/table';
 import { cn } from '@/lib/cn';
-import { date, relative, toMinor, usd, usdDecimal, wbt } from '@/lib/format';
+import { date, relative, toMinor, usd, usdDecimal } from '@/lib/format';
 import { getData } from '@/server/data';
 import { isNotWired, load } from '@/server/load';
 import { getViewer } from '@/server/viewer';
@@ -50,8 +49,7 @@ export default async function OverviewPage() {
   const { summary, onboarding, activity } = overview;
   const readOnly = viewer?.role === 'accountant';
   const remaining = onboarding.filter(step => !step.done);
-  const tank = summary.gasTank;
-  const runway = tank.runwayDays ?? 0;
+  const terms = summary.feeTerms;
   return (
     <>
       <PageHeader
@@ -167,32 +165,37 @@ export default async function OverviewPage() {
         </Card>
         <Card>
           <CardHeader
-            title="Gas tank"
-            description="You pay gas so customers never do"
-            action={<IconGasStation className="size-5 text-muted-foreground" />}
+            title="Fees"
+            description="Taken from each payment. Customers never pay a fee or gas."
+            action={<IconReceiptTax className="size-5 text-muted-foreground" />}
           />
-          <CardBody className="flex items-center gap-5">
-            <Gauge
-              value={runway}
-              max={30}
-              label={tank.runwayDays === null ? '—' : String(Math.floor(runway))}
-              sublabel="days left"
-              tone={runway < 7 ? 'danger' : runway < 14 ? 'warning' : 'success'}
-            />
-            <div className="min-w-0 text-sm">
-              <p className="text-muted-foreground">Balance</p>
+          <CardBody className="grid gap-3 text-sm">
+            <div>
+              <p className="text-muted-foreground">Fee terms</p>
               <p className="text-lg font-semibold">
-                {tank.balanceWei ? wbt(tank.balanceWei) : 'Unavailable'}
+                {terms.accepted === null
+                  ? 'Unavailable'
+                  : terms.accepted
+                    ? `Signed, version ${terms.acceptedVersion}`
+                    : 'Not signed yet'}
               </p>
-              <p className="mt-2 text-muted-foreground">Spent today</p>
-              <p className="font-medium">{tank.spentTodayWei ? wbt(tank.spentTodayWei, 5) : '—'}</p>
-              <Link
-                href="/dashboard/gas-tank"
-                className="mt-3 inline-flex items-center gap-1 font-medium underline-offset-4 hover:underline"
-              >
-                Open gas tank <IconArrowRight className="size-3.5" />
-              </Link>
+              {terms.accepted === false && (
+                <p className="text-warning">Payments to you are refused until you sign.</p>
+              )}
+              {terms.accepted && terms.latestVersion !== null && (terms.acceptedVersion ?? 0) < terms.latestVersion && (
+                <p className="text-muted-foreground">Version {terms.latestVersion} is available to sign.</p>
+              )}
             </div>
+            <div>
+              <p className="text-muted-foreground">Pact fees, all time</p>
+              <p className="font-medium">{usdDecimal(summary.metrics.feesUsdt)}</p>
+            </div>
+            <Link
+              href="/dashboard/fees"
+              className="inline-flex items-center gap-1 font-medium underline-offset-4 hover:underline"
+            >
+              {terms.accepted === false ? 'Sign the fee terms' : 'Open fees'} <IconArrowRight className="size-3.5" />
+            </Link>
           </CardBody>
         </Card>
       </div>
@@ -323,8 +326,8 @@ export default async function OverviewPage() {
               </div>
             ))}
             <p className="text-[13px] text-muted-foreground">
-              Fees are taken in the same transaction as each payment. Gas is paid separately from the gas tank
-              in WBT; see Exports for the full ledger.
+              Pact’s fee comes out of each payment, in the same transaction, and Pact pays the gas. See Exports
+              for the full ledger.
             </p>
           </CardBody>
         </Card>

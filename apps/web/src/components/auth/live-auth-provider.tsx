@@ -2,7 +2,7 @@
 
 import { useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import type { Address, Hex, WalletClient } from 'viem';
+import type { Address, WalletClient } from 'viem';
 import {
   forgetLocalAccount,
   injectedAccount,
@@ -11,7 +11,6 @@ import {
   merchantWalletKind,
   rememberMerchantWalletKind,
   rememberWalletKind,
-  sendPrepared,
   walletKind,
   signableTypedData,
   walletSignIn,
@@ -204,30 +203,6 @@ function LiveAuthInner({
           else if (role === 'customer') forgetLocalAccount('customer');
           else rememberWalletKind(role, null);
         }),
-      approveAsCustomer: async (message: Hex, delegate: Hex | null, nonce: number | null) => {
-        if (!customer) throw new Error('Sign in to pay.');
-        if (customer.kind === 'privy') {
-          if (!privy) throw new Error('Email sign-in is not set up.');
-          return privy.approve(message, delegate ?? undefined, nonce ?? undefined);
-        }
-        const account = localAccount('customer');
-        if (!account || account.address.toLowerCase() !== customer.address.toLowerCase())
-          throw new Error('Sign in again to pay.');
-        const signature = await account.signMessage({ message: { raw: message } });
-        if (!delegate || nonce === null) return { signature };
-        const auth = await account.signAuthorization({ address: delegate, chainId: 1874, nonce });
-        return {
-          signature,
-          authorization: {
-            address: auth.address,
-            chainId: auth.chainId,
-            nonce: auth.nonce,
-            r: auth.r,
-            s: auth.s,
-            yParity: auth.yParity,
-          },
-        };
-      },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [config, sessions, busy, privy, merchantWallet, walletFor, run],
@@ -254,14 +229,7 @@ function LiveAuthInner({
     },
     async sign(request) {
       try {
-        // Transactions the signer's own wallet sends (invoice financing): the "signature" is their hashes.
-        if (request.transactions?.length) {
-          const role: WalletRole =
-            request.signer === 'investor' || request.signer === 'compliance' ? request.signer : 'merchant';
-          const client = await walletFor(role);
-          return JSON.stringify(await sendPrepared(client, config, request.transactions));
-        }
-        // Investors and compliance officers only sign; Pact's relayer submits and pays the gas.
+        // Everyone only signs; Pact's relayer submits and pays the gas.
         if (request.signer === 'investor' || request.signer === 'compliance') {
           const client = await walletFor(request.signer);
           return await client.signTypedData({

@@ -26,7 +26,7 @@ export default async function SubscribePage({ params }: { params: Promise<{ plan
   const { plan, brand } = offer;
   const every = period(plan.periodSeconds);
   const price = usdDecimal(plan.amount);
-  const limit = plan.maxPeriods ? `for at most ${plan.maxPeriods} ${every}s` : 'until you cancel';
+  const limit = plan.maxPeriods ? `for at most ${plan.maxPeriods} payment${plan.maxPeriods === 1 ? '' : 's'}` : 'until you cancel';
   const back = { href: '/', history: true };
   return (
     <CheckoutLayout

@@ -25,7 +25,7 @@ export function RefreshFooter({ anchorBase = '' }: { anchorBase?: string } = {})
             <a href={`${anchorBase}#checkout`}>{'Checkout'}</a>
             <a href={`${anchorBase}#subscriptions`}>{'Subscriptions'}</a>
             <a href={`${anchorBase}#agents`}>{'Agent payments'}</a>
-            <a href={`${anchorBase}#gas`}>{'Gas tank'}</a>
+            <a href={`${anchorBase}#fees`}>{'Fees'}</a>
           </div>
           <div>
             <h3>{'Developers'}</h3>

@@ -55,12 +55,13 @@ test('insufficient funds sends checkout to add funds', async ({ page }) => {
 
 test('reset returns the scenario to the happy path', async ({ page }) => {
   await viewAs(page, 'merchant');
-  await page.goto('/dashboard/gas-tank');
-  await chooseScenario(page, 'gas-empty', /gas tank drops to 0/);
-  await expect(page.getByLabel('Review scenario')).toHaveValue('gas-empty');
+  await page.goto('/dashboard/fees');
+  await chooseScenario(page, 'terms-unsigned', /has not signed Pact’s fee terms/);
+  await expect(page.getByLabel('Review scenario')).toHaveValue('terms-unsigned');
+  await expect(page.getByRole('button', { name: 'Sign fee terms' })).toBeVisible();
   await page.getByRole('button', { name: 'Reset demo data' }).click();
   await expect(page.getByLabel('Review scenario')).toHaveValue('happy');
-  await expect(page.getByText(/gas tank drops to 0/)).toBeHidden();
+  await expect(page.getByText(/has not signed Pact’s fee terms/)).toBeHidden();
 });
 
 test('a store purchase is fulfilled once and a duplicate webhook is ignored', async ({ page }) => {

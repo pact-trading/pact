@@ -29,6 +29,7 @@ import {
   customer,
   ensureAccount,
   feeFor,
+  gasFeeMinor,
   payInvoice,
   reasonDetail,
   refusal,
@@ -95,7 +96,7 @@ const RECEIVABLES: Address = '0x5ec0b1e7a9d24c6f8e3a1b0d7c4f92e6a8b3d150';
 const COMPLIANCE: Address = '0xc0391a5e7b2d4f86a1e3c9d07b5f2a8e4d6c1b93';
 const FEE_VAULT = '0x5e3f…fee';
 const RELAYER = '0x9b2c…relayer';
-/** Gas for investor, compliance and keeper transactions, paid by Pact, never by a merchant's tank. */
+/** Gas for investor, compliance and keeper transactions. Pact pays it: nobody else needs WBT. */
 const PACT_GAS_WEI = 210_000_000_000_000n;
 const INVESTOR_ID = 'inv_lotus';
 const HARBOR_ID = 'inv_harbor';
@@ -273,14 +274,13 @@ type FinancingEntryType =
 /** Books a financing movement in the merchant's ledger, so the export reconciles to its balance. */
 function book(
   s: MockStore,
-  entry: Omit<AccountingEntry, 'id' | 'type' | 'orderId' | 'gasWei' | 'refundOf'> & {
+  entry: Omit<AccountingEntry, 'id' | 'type' | 'orderId' | 'refundOf'> & {
     type: FinancingEntryType;
   },
 ) {
   s.accounting.push({
     id: s.ids.next('acc', 20000),
     orderId: null,
-    gasWei: 0n,
     refundOf: null,
     ...entry,
   });
@@ -761,7 +761,8 @@ function collectFinanced(s: MockStore, record: InvoiceRecord, c: CustomerRecord,
   const parts = split(p, (amount * sold(p)) / p.faceMinor);
   const toHolders = sumBig(parts, part => part.amount);
   const toMerchant = amount - toHolders;
-  const fee = toMerchant > 0n ? minBig(feeFor(s, toMerchant), toMerchant) : 0n;
+  // Pact's invoice rate, on the merchant's part only.
+  const fee = toMerchant >= USDT(1) ? minBig(feeFor(toMerchant, 'invoice'), toMerchant) : 0n;
   // No fee on the holders' share: Pact took its fee when the invoice was funded.
   const sponsored = sponsor(s, {
     action: 'payment',
@@ -812,7 +813,7 @@ function collectFinanced(s: MockStore, record: InvoiceRecord, c: CustomerRecord,
       },
     ],
     gasWei: sponsored.gasWei,
-    gasPaidBy: `${s.merchant.name} gas tank`,
+    gasPaidBy: 'Pact relayer (customers never pay gas)',
   };
   state(s)!.chain.unshift(tx);
   // The invoice is paid, so it is income; what went to the holders leaves again as repayments.
@@ -825,7 +826,6 @@ function collectFinanced(s: MockStore, record: InvoiceRecord, c: CustomerRecord,
     customer: c.email,
     grossMinor: amount,
     feeMinor: fee,
-    gasWei: sponsored.gasWei,
     refundOf: null,
     txHash: sponsored.txHash,
   });
@@ -848,7 +848,7 @@ function collectFinanced(s: MockStore, record: InvoiceRecord, c: CustomerRecord,
   });
   // Paid in full: anything still owed is the late fee, which the reserve covers.
   if (completes || owed(p) === 0n) settle(s, p, tx);
-  return { txHash: sponsored.txHash, feeMinor: fee, gasWei: sponsored.gasWei };
+  return { txHash: sponsored.txHash, feeMinor: fee };
 }
 
 /** Past the grace period and unpaid: freeze the token, pay the reserve to the holders, trigger the buy-back. */
@@ -897,14 +897,16 @@ export function buyBack(s: MockStore, invoiceId: string) {
   if (!p || p.status !== 'defaulted')
     throw new DataError('not_defaulted', 'Only a defaulted invoice can be bought back.', 409);
   const amount = owed(p);
-  if (s.merchant.usdtMinor < amount)
+  // The merchant signs; Pact's relayer sends it and takes the network fee in USDT.
+  const networkFee = gasFeeMinor(s, PACT_GAS_WEI);
+  if (s.merchant.usdtMinor < amount + networkFee)
     throw new DataError(
       'insufficient_funds',
-      `${s.merchant.name} has ${usd(s.merchant.usdtMinor)}; the buy-back is ${usd(amount)}.`,
+      `${s.merchant.name} has ${usd(s.merchant.usdtMinor)}; the buy-back is ${usd(amount)} plus up to ${usd(networkFee)} network fee.`,
       409,
     );
   const parts = split(p, amount);
-  s.merchant.usdtMinor -= amount;
+  s.merchant.usdtMinor -= amount + networkFee;
   const paid = payHolders(s, parts);
   const tx = chain(s, {
     method: 'recourse',
@@ -920,7 +922,7 @@ export function buyBack(s: MockStore, invoiceId: string) {
       { name: 'BoughtBack', detail: `${s.merchant.name} paid the holders in full; their tokens are burned` },
     ],
     gasWei: PACT_GAS_WEI,
-    gasPaidBy: `${s.merchant.name} wallet`,
+    gasPaidBy: `Pact relayer, charged to ${s.merchant.name} in USDT`,
   });
   for (const { investor, amount: a } of paid)
     book(s, {
@@ -932,6 +934,19 @@ export function buyBack(s: MockStore, invoiceId: string) {
       feeMinor: 0n,
       txHash: tx.hash,
     });
+  // The buy-back's network fee, paid in USDT through the Router.
+  s.accounting.push({
+    id: s.ids.next('acc', 20000),
+    at: tx.at,
+    type: 'Fee',
+    objectId: invoiceId,
+    orderId: null,
+    customer: s.merchant.name,
+    grossMinor: 0n,
+    feeMinor: networkFee,
+    refundOf: null,
+    txHash: tx.hash,
+  });
   p.status = 'bought_back';
   p.closedAt = tx.at;
   event(s, p, {
@@ -1871,7 +1886,7 @@ export function seedFinancing(s: MockStore): FinancingState {
   // History ran with the clock set back, so put the shared newest-first lists back in order.
   const newestFirst = <T>(list: T[], key: (item: T) => string) =>
     list.sort((a, b) => key(b).localeCompare(key(a)));
-  newestFirst(s.gas.ledger, e => e.createdAt);
+  newestFirst(s.relayed, e => e.createdAt);
   newestFirst(s.webhookEvents, e => e.created_at);
   newestFirst(s.webhookDeliveries, d => d.next_at);
   newestFirst(s.agentCalls, c => c.createdAt);

@@ -21,7 +21,8 @@ import { chooseViewer } from '@/server/actions/demo';
 const short = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`;
 
 /**
- * Live sign-in. A business connects a wallet: that address is its workspace and gas tank.
+ * Live sign-in. A business connects a wallet: that address is its workspace and payout account. It
+ * only signs, so it needs no WBT.
  * A customer signs in with email (no wallet, no gas). On a local fork, test wallets replace both.
  */
 export function LoginCard({ returnTo }: { returnTo?: string }) {

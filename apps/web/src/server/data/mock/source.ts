@@ -1,12 +1,20 @@
 import 'server-only';
-import type { DashboardSummary, ExportReport, MerchantSettings, WebhookDelivery } from '@pactagent/core/api-types';
+import type {
+  DashboardSummary,
+  ExportReport,
+  FeeLedgerEntry,
+  FeesDetail,
+  FeeTermsStatus,
+  MerchantSettings,
+  MerchantSpender,
+  WebhookDelivery,
+} from '@pactagent/core/api-types';
 import type { Product } from '@pactagent/core/commerce-types';
 import type {
   AgentSession,
   CustomerSummary,
   DrainAttempt,
   DrainRun,
-  GasTankDetail,
   InvoiceDetail,
   OnboardingStep,
   OrderListItem,
@@ -33,7 +41,9 @@ import {
   chargeSubscription,
   customer as customerRecord,
   dec6,
+  FEE_TERMS,
   layerFor,
+  MIN_AMOUNT_MINOR,
   payInvoice,
   payOrder,
   plan as planRecord,
@@ -47,7 +57,6 @@ import {
   subscribe,
   tick,
   USDT,
-  WEI,
   webhook,
 } from './engine';
 import { checkMockAnswers, createMockCommerce, linkOrderProblem, planArchived, mockDiscount, redeemMockDiscount } from './commerce-extras';
@@ -85,6 +94,9 @@ import {
 const ROUTER = '0x014BC0e127D4660a3ef369a9d71a57e727a7D34f';
 const SUBSCRIPTIONS = '0xAAB13cEfEb4291842439Bb958F54C11459e09573';
 const USDT_ADDRESS = '0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7';
+/** Synthetic escrow and FeeSchedule addresses the demo signs against (mock only). */
+const ESCROW = '0x7f1a3c5e9b2d4068a1c3e5f7092b4d6e8a0c2e41';
+const FEES = '0x4e8b2d6f0a1c3e5b7d9f1a3c5e7b9d0f2a4c6e81';
 
 /** Every read first runs the keeper up to the demo clock. */
 async function current(): Promise<MockStore> {
@@ -167,7 +179,6 @@ function orderDetail(s: MockStore, record: OrderRecord): OrderDetail {
             id: paymentId,
             txHash: record.txHash,
             feeMinor: record.feeMinor.toString(),
-            gasWei: record.gasWei.toString(),
             payer: record.payerAddress,
             // Orders paid before methods were recorded were paid from the payer's Pact account.
             method: record.method ?? ACCOUNT_METHOD,
@@ -260,17 +271,97 @@ function agentView(s: MockStore, id: string): AgentSession {
   };
 }
 
-function averageDailyGas(s: MockStore) {
-  const since = now(s) - 7 * DAY;
-  const total = s.gas.ledger
-    .filter(e => new Date(e.createdAt).getTime() >= since)
-    .reduce((sum, e) => sum + BigInt(e.gasWei), 0n);
-  return total / 7n;
+// ------------------------------------------------------------------- fees
+
+const rateView = (rate: (typeof FEE_TERMS)['checkout' | 'invoice']) => ({
+  bps: rate.bps,
+  percent: `${(rate.bps / 100).toFixed(2)}%`,
+  minimumUsdt: dec6(rate.minFeeMinor),
+  capUsdt: rate.maxFeeMinor === 0n ? null : dec6(rate.maxFeeMinor),
+});
+const termsView = () => ({ checkout: rateView(FEE_TERMS.checkout), invoice: rateView(FEE_TERMS.invoice) });
+
+const PERMITS: Record<MerchantSpender, { label: string; address: string }> = {
+  escrow: { label: 'Refunds: the escrow sends a refund from your wallet when you issue one', address: ESCROW },
+  router: { label: 'Refund gas: the network fee for a refund you send, in USDT', address: ROUTER },
+};
+
+function feeTermsStatus(s: MockStore): FeeTermsStatus {
+  const accepted = s.fees.acceptedVersion;
+  return {
+    acceptedVersion: accepted,
+    latestVersion: FEE_TERMS.version,
+    accepted: accepted ? termsView() : null,
+    latest: termsView(),
+    needsAcceptance: accepted === 0,
+    newerTermsAvailable: accepted !== 0 && accepted < FEE_TERMS.version,
+  };
 }
 
-function runwayDays(s: MockStore) {
-  const daily = averageDailyGas(s);
-  return daily === 0n ? null : Number((s.gas.balanceWei * 10n) / daily) / 10;
+const feesReady = (s: MockStore) => s.fees.acceptedVersion !== 0 && s.fees.permits.escrow && s.fees.permits.router;
+
+/** Every fee Pact took, newest first: from payments, renewals and invoices, and refund network fees. */
+function feeLedger(s: MockStore, limit: number): FeeLedgerEntry[] {
+  const labels: Record<string, string> = {
+    Payment: 'Payment',
+    Subscription: 'Subscription renewal',
+    Invoice: 'Invoice payment',
+    'Agent payment': 'Agent payment',
+    Fee: 'Refund network fee',
+  };
+  return s.accounting
+    .filter(e => e.feeMinor !== 0n && !e.type.startsWith('Financing'))
+    .sort((a, b) => b.at - a.at)
+    .slice(0, limit)
+    .map(e => {
+      const gross = e.type === 'Fee' ? 0n : e.grossMinor;
+      return {
+        id: e.id,
+        at: iso(e.at),
+        kind: e.type,
+        label: labels[e.type] ?? e.type,
+        objectId: e.objectId,
+        grossUsdt: dec6(gross),
+        feeUsdt: dec6(e.feeMinor),
+        netUsdt: dec6(gross - e.feeMinor),
+        txHash: (e.txHash ?? '0x') as `0x${string}`,
+      };
+    });
+}
+
+function feesDetail(s: MockStore): FeesDetail {
+  const since = now(s) - 30 * DAY;
+  let gross = 0n;
+  let fees = 0n;
+  let payments = 0;
+  for (const e of s.accounting) {
+    if (e.at < since) continue;
+    if (['Payment', 'Subscription', 'Invoice'].includes(e.type)) {
+      gross += e.grossMinor;
+      fees += e.feeMinor;
+      payments += 1;
+    } else if (e.type === 'Fee') fees += e.feeMinor;
+  }
+  return {
+    terms: feeTermsStatus(s),
+    permits: (Object.keys(PERMITS) as MerchantSpender[]).map(spender => ({
+      spender,
+      label: PERMITS[spender].label,
+      address: PERMITS[spender].address as `0x${string}`,
+      status: s.fees.permits[spender] ? 'ready' : 'needs_approval',
+      reason: null,
+    })),
+    ready: feesReady(s),
+    totals: {
+      days: 30,
+      grossUsdt: dec6(gross),
+      feesUsdt: dec6(fees),
+      netUsdt: dec6(gross - fees),
+      payments,
+      effectiveRateBps: gross > 0n ? Number((fees * 10_000n) / gross) : null,
+    },
+    ledger: feeLedger(s, 20),
+  };
 }
 
 function onboarding(s: MockStore): OnboardingStep[] {
@@ -278,7 +369,7 @@ function onboarding(s: MockStore): OnboardingStep[] {
   return [
     { id: 'account', title: 'Create your account with a passkey', done: o.account },
     { id: 'brand', title: 'Add your business name and logo', done: o.brand },
-    { id: 'gas', title: 'Fund your gas tank', done: o.gas },
+    { id: 'fees', title: 'Sign the fee terms and refund permits', done: feesReady(s) },
     { id: 'integrate', title: 'Add checkout to your store', done: o.integrate },
     { id: 'test_payment', title: 'Take a test payment', done: o.test_payment },
   ];
@@ -312,9 +403,6 @@ function summary(s: MockStore): DashboardSummary {
       ),
     };
   });
-  const spentToday = s.gas.ledger
-    .filter(e => e.createdAt.startsWith(today))
-    .reduce((total, e) => total + BigInt(e.gasWei), 0n);
   return {
     generatedAt: iso(at),
     timeZone: 'UTC',
@@ -369,12 +457,10 @@ function summary(s: MockStore): DashboardSummary {
       txHash: null,
       reason: null,
     })),
-    gasTank: {
-      available: true,
-      balanceWei: s.gas.balanceWei.toString(),
-      dailyCapWei: s.gas.dailyCapWei.toString(),
-      spentTodayWei: spentToday.toString(),
-      runwayDays: runwayDays(s),
+    feeTerms: {
+      accepted: s.fees.acceptedVersion !== 0,
+      acceptedVersion: s.fees.acceptedVersion,
+      latestVersion: FEE_TERMS.version,
     },
   };
 }
@@ -426,7 +512,7 @@ function activityFeed(s: MockStore): DashboardOverview['activity'] {
         title: 'Sponsored request refused',
         detail:
           s.refusals.find(r => r.objectId === e.object_id)?.detail ??
-          'A limit stopped it before any gas was spent.',
+          'A limit stopped it before anything was sent.',
         tone: 'warning',
         href: '/dashboard/security',
       });
@@ -438,8 +524,6 @@ function exportReport(s: MockStore, range: { from?: string; to?: string }): Expo
   const from = range.from ? new Date(`${range.from}T00:00:00Z`).getTime() : -Infinity;
   const to = range.to ? new Date(`${range.to}T23:59:59.999Z`).getTime() : Infinity;
   const entries = s.accounting.filter(e => e.at >= from && e.at <= to).sort((a, b) => a.at - b.at);
-  const usd = (wei: bigint) => (wei * s.gas.wbtUsdMinor) / 10n ** 18n;
-  const wbt = (wei: bigint) => `${wei / 10n ** 18n}.${(wei % 10n ** 18n).toString().padStart(18, '0')}`;
   // Payments show the price before the discount; refunds and fees stay as recorded.
   const discountOf = (e: (typeof entries)[number]) => {
     const order = e.grossMinor > 0n && e.orderId ? s.orders.find(o => o.order.id === e.orderId)?.order : undefined;
@@ -459,8 +543,6 @@ function exportReport(s: MockStore, range: { from?: string; to?: string }): Expo
       'Discount Code': discount.code,
       'Fee USDT': dec6(e.feeMinor),
       'Net USDT': dec6(net),
-      'Gas Cost WBT': wbt(e.gasWei),
-      'Gas Cost USD Estimate': dec6(usd(e.gasWei)),
       'Refund Of': e.refundOf ?? '',
       'Financing Status': '',
       'Transaction Hash': e.txHash ?? '',
@@ -471,7 +553,6 @@ function exportReport(s: MockStore, range: { from?: string; to?: string }): Expo
   const gross = entries.reduce((t, e) => t + e.grossMinor, 0n);
   const discounts = entries.reduce((t, e) => t + discountOf(e).amount, 0n);
   const fees = entries.reduce((t, e) => t + e.feeMinor, 0n);
-  const gas = entries.reduce((t, e) => t + e.gasWei, 0n);
   return {
     rows,
     totals: {
@@ -479,11 +560,10 @@ function exportReport(s: MockStore, range: { from?: string; to?: string }): Expo
       discountsUSDT: dec6(discounts),
       feesUSDT: dec6(fees),
       netUSDT: dec6(gross - fees),
-      gasWBT: wbt(gas),
       tokenDeltaUSDT: dec6(gross - fees),
     },
     accountingBasis:
-      'Confirmed onchain events; gas is paid from the merchant gas tank in WBT and reported separately.',
+      'Confirmed block timestamps. Fee is what Pact took out of each payment, plus the USDT network fee of refunds you sent; Net is what reached your wallet.',
   };
 }
 
@@ -586,8 +666,8 @@ function checkoutState(s: MockStore, id: string, viewer: Viewer): CheckoutState 
       network: 'Whitechain Sepolia (chain 1874)',
       payerAccount: c.address,
       merchantAccount: s.merchant.address,
-      gasPaidBy: `${s.merchant.name}'s gas tank`,
-      gasWei: settled ? (s.gas.ledger.find(g => g.txHash === checkout.txHash)?.gasWei ?? null) : null,
+      gasPaidBy: 'Pact',
+      gasWei: settled ? (s.relayed.find(g => g.txHash === checkout.txHash)?.gasWei ?? null) : null,
     },
     methods: demoMethods(s, checkout),
     method: checkout.method ?? null,
@@ -630,7 +710,7 @@ function startSettlement(
 }
 
 function drainRun(s: MockStore): DrainRun {
-  const before = s.gas.balanceWei;
+  const before = s.merchant.usdtMinor;
   const attempts: DrainAttempt[] = [];
   const attempt = (
     attack: DrainAttempt['attack'],
@@ -659,7 +739,7 @@ function drainRun(s: MockStore): DrainRun {
   for (let i = 0; i < 3; i++)
     attempt(
       'replay',
-      `Replay a captured payment intent (copy ${i + 1})`,
+      `Replay a sponsored payment that already ran (copy ${i + 1})`,
       `nonce ${reused.slice(0, 10)}…`,
       direct('replay', s.ids.address()),
     );
@@ -667,14 +747,14 @@ function drainRun(s: MockStore): DrainRun {
     const actor = s.ids.address();
     attempt(
       'dust',
-      'Sponsored payment of $0.01',
+      'Dust payment of 0.000001 USDT',
       actor,
       viaRelayer({
         action: 'payment',
         objectId: s.ids.tx(),
         label: 'Dust payment',
         payer: actor,
-        amountMinor: USDT(0.01),
+        amountMinor: 1n,
         feeMinor: 0n,
       }),
     );
@@ -686,34 +766,22 @@ function drainRun(s: MockStore): DrainRun {
       s.ids.address(),
       direct('wrong_selector', s.ids.address()),
     );
+  for (let i = 0; i < 3; i++)
+    attempt('over_gas_cap', 'Gas-heavy call above the per-call cap', s.ids.address(), direct('gas_limit', s.ids.address()));
+  // Only the merchant can sign a call that spends its USDT; a stranger's refund never runs.
   for (let i = 0; i < 50; i++) {
     const actor = s.ids.address();
     attempt(
-      'spam_accounts',
-      `New account ${i + 1} of 50, $5 payment with no fee`,
+      'spend_merchant_funds',
+      `A new account signs a refund that would spend the merchant's USDT (${i + 1}/50)`,
       actor,
-      viaRelayer({
-        action: 'payment',
-        objectId: s.ids.tx(),
-        label: 'Spam payment',
-        payer: actor,
-        amountMinor: USDT(5),
-        feeMinor: 0n,
-      }),
+      direct('signer_not_merchant', actor),
     );
   }
-  const looper = s.ids.address();
-  for (let i = 0; i < 5; i++)
-    attempt(
-      'over_daily_cap',
-      `Sponsored action ${21 + i} from one payer today`,
-      looper,
-      direct('payer_daily_cap', looper),
-    );
   for (let i = 0; i < 2; i++)
     attempt(
       'stale_deadline',
-      'Intent signed yesterday with an expired deadline',
+      'Intent with an expired deadline',
       s.ids.address(),
       direct('deadline', s.ids.address()),
     );
@@ -722,8 +790,8 @@ function drainRun(s: MockStore): DrainRun {
     startedAt: iso(now(s)),
     attempts,
     legitimateSent: 0,
-    tankBeforeWei: before.toString(),
-    tankAfterWei: s.gas.balanceWei.toString(),
+    merchantBalanceBeforeMinor: before.toString(),
+    merchantBalanceAfterMinor: s.merchant.usdtMinor.toString(),
   };
 }
 
@@ -841,10 +909,10 @@ const source: DataSource = {
         blockNumber: summary(s).balance!.blockNumber!,
         targetGas: 120_000,
         gasPriceWei: '1000000000',
-        usdtPerWbtMinor: s.gas.wbtUsdMinor.toString(),
-        maximumReimbursementWei: WEI(0.0006).toString(),
-        minimumFeeMinor: USDT(0.05).toString(),
-        minimumAmountMinor: s.gas.policy.minimumAmountMinor,
+        usdtPerWbtMinor: s.fees.usdtPerWbtMinor.toString(),
+        // 120,000 gas at 1 gwei, at the FeeSchedule's WBT price, rounded up.
+        maximumGasFeeMinor: ((120_000n * 1_000_000_000n * s.fees.usdtPerWbtMinor + 10n ** 18n - 1n) / 10n ** 18n).toString(),
+        minimumAmountMinor: MIN_AMOUNT_MINOR.toString(),
       };
     },
     async overview() {
@@ -1041,17 +1109,6 @@ const source: DataSource = {
       }));
       if (parsed.some(l => l.unit <= 0n || !Number.isInteger(l.quantity) || l.quantity < 1))
         throw new DataError('invalid_lines', 'Each line needs a quantity and a price above zero.', 400);
-      // When the customer pays the fee, a line grosses the subtotal up so the payout nets it.
-      if ((await mockSource.merchant.preferences()).feeMode === 'customer') {
-        const subtotal = parsed.reduce((t, l) => t + l.unit * BigInt(l.quantity), 0n);
-        const bps = BigInt(s.merchant.feeBps);
-        const fee = (subtotal * bps + 10_000n - bps - 1n) / (10_000n - bps);
-        parsed.push({
-          description: 'Payment processing fee',
-          quantity: 1,
-          unit: fee < USDT(0.05) ? USDT(0.05) : fee,
-        });
-      }
       const total = parsed.reduce((t, l) => t + l.unit * BigInt(l.quantity), 0n);
       const due = input.dueAt ? new Date(input.dueAt).getTime() : now(s) + 30 * DAY;
       let c = s.customers.find(item => item.email === email);
@@ -1194,75 +1251,90 @@ const source: DataSource = {
         .slice(0, filter?.limit ?? 100);
     },
 
-    async gasTank() {
+    async fees() {
       await readMerchant();
+      return feesDetail(await current());
+    },
+    async feeLedger(limit = 50) {
+      await readMerchant();
+      return feeLedger(await current(), limit);
+    },
+    async prepareAcceptTerms() {
+      const viewer = await writeMerchant();
       const s = await current();
-      const at = now(s);
-      const today = dayKey(at);
-      const counts = new Map<string, number>();
-      for (const r of s.refusals)
-        if (r.source === 'sponsorship') counts.set(r.reason, (counts.get(r.reason) ?? 0) + 1);
-      const detail: GasTankDetail = {
-        merchant: s.merchant.address,
-        balanceWei: s.gas.balanceWei.toString(),
-        dailyCapWei: s.gas.dailyCapWei.toString(),
-        spentTodayWei: s.gas.ledger
-          .filter(e => e.createdAt.startsWith(today))
-          .reduce((t, e) => t + BigInt(e.gasWei), 0n)
-          .toString(),
-        runwayDays: runwayDays(s),
-        refusals: [...counts].map(([reason, count]) => ({ reason, count })),
-        policy: { ...s.gas.policy },
-        wbtUsdMinor: s.gas.wbtUsdMinor.toString(),
-        faucet: {
-          amountWei: WEI(0.5).toString(),
-          nextClaimAt:
-            s.gas.faucetClaimedAt && s.gas.faucetClaimedAt + DAY > at
-              ? iso(s.gas.faucetClaimedAt + DAY)
-              : null,
-          source: 'Whitechain Sepolia faucet: 0.5 WBT per 24 hours per GitHub account',
+      const terms = termsView();
+      return prepare(
+        s,
+        viewer,
+        'fee-terms',
+        { version: String(FEE_TERMS.version) },
+        {
+          title: 'Sign Pact’s fee terms',
+          lines: [
+            { label: 'Checkout payments and renewals', value: `${terms.checkout.percent}, at least ${terms.checkout.minimumUsdt} USDT` },
+            { label: 'Invoices', value: `${terms.invoice.percent}, at most ${terms.invoice.capUsdt} USDT` },
+            { label: 'Taken from', value: 'Each payment, before it reaches your wallet' },
+            { label: 'Your customers pay', value: 'No fee and no gas' },
+          ],
+          signer: 'merchant',
         },
-        history: Array.from({ length: 14 }, (_, i) => {
-          const key = dayKey(at - (13 - i) * DAY);
-          const entries = s.gas.ledger.filter(e => e.createdAt.startsWith(key));
-          return {
-            date: key,
-            spentWei: entries.reduce((t, e) => t + BigInt(e.gasWei), 0n).toString(),
-            actions: entries.length,
-          };
+        typedData('Pact Fees', FEES, 'AcceptTerms', {
+          merchant: s.merchant.address,
+          version: String(FEE_TERMS.version),
+          nonce: '0',
+          deadline: String(Math.floor(now(s) / 1000) + 600),
         }),
-      };
-      return detail;
+      );
     },
-    async gasLedger(limit = 50) {
-      await readMerchant();
-      return (await await current()).gas.ledger.slice(0, limit);
-    },
-    async updateGasPolicy(update) {
-      await writeMerchant();
+    async submitAcceptTerms(token, signature) {
+      const viewer = await writeMerchant();
       const s = await current();
-      if (update.mode) s.gas.policy.mode = update.mode;
-      if (update.surchargeMinor !== undefined)
-        s.gas.policy.surchargeMinor = validateMinor(update.surchargeMinor, 'The surcharge').toString();
-      if (update.perPayerDailyActions !== undefined)
-        s.gas.policy.perPayerDailyActions = Math.max(
-          1,
-          Math.min(100, Math.round(update.perPayerDailyActions)),
-        );
-      if (update.lowRunwayAlertDays !== undefined)
-        s.gas.policy.lowRunwayAlertDays = Math.max(1, Math.round(update.lowRunwayAlertDays));
-      return mockSource.merchant.gasTank();
+      const { version } = consume(s, viewer, 'fee-terms', token, signature);
+      if (Number(version) !== FEE_TERMS.version)
+        throw new DataError('fee_terms_changed', 'Pact published newer terms. Review them and sign again.', 409);
+      // Pact's relayer submits the signed acceptance and pays its gas.
+      sponsor(s, { action: 'fee_terms', objectId: s.merchant.id, label: 'Fee terms accepted', payer: s.merchant.address });
+      s.fees.acceptedVersion = FEE_TERMS.version;
+      s.merchant.onboarding.fees = feesReady(s);
+      return feesDetail(s);
     },
-    async claimFaucet() {
-      await writeMerchant();
+    async preparePermit(spender) {
+      const viewer = await writeMerchant();
       const s = await current();
-      const at = now(s);
-      if (s.gas.faucetClaimedAt && s.gas.faucetClaimedAt + DAY > at)
-        throw new DataError('faucet_cooldown', 'The faucet allows one claim every 24 hours.', 429);
-      s.gas.balanceWei += WEI(0.5);
-      s.gas.faucetClaimedAt = at;
-      s.merchant.onboarding.gas = true;
-      return mockSource.merchant.gasTank();
+      const permit = PERMITS[spender];
+      if (!permit) throw new DataError('unknown_spender', 'Choose the escrow or the Router.', 404);
+      if (s.fees.permits[spender]) throw new DataError('permit_ready', 'This permit is already in place.', 409);
+      return prepare(
+        s,
+        viewer,
+        'fee-permit',
+        { spender },
+        {
+          title: spender === 'escrow' ? 'Allow refunds from your wallet' : 'Allow refund network fees in USDT',
+          lines: [
+            { label: 'Allows', value: permit.label },
+            { label: 'Spent only on', value: 'Refunds you sign yourself' },
+            { label: 'Network fee to sign', value: 'None: Pact submits it' },
+          ],
+          signer: 'merchant',
+        },
+        typedData('Tether USD', USDT_ADDRESS, 'Permit', {
+          owner: s.merchant.address,
+          spender: permit.address,
+          value: (2n ** 256n - 1n).toString(),
+          nonce: String(Number(s.fees.permits.escrow) + Number(s.fees.permits.router)),
+          deadline: String(Math.floor(now(s) / 1000) + 300),
+        }),
+      );
+    },
+    async submitPermit(token, signature) {
+      const viewer = await writeMerchant();
+      const s = await current();
+      const { spender } = consume(s, viewer, 'fee-permit', token, signature) as { spender: MerchantSpender };
+      sponsor(s, { action: 'permit', objectId: `${s.merchant.id}:${spender}`, label: `USDT permit for the ${spender}`, payer: s.merchant.address });
+      s.fees.permits[spender] = true;
+      s.merchant.onboarding.fees = feesReady(s);
+      return feesDetail(s);
     },
 
     async securityLayers() {
@@ -1420,38 +1492,21 @@ const source: DataSource = {
           preferences?: Awaited<ReturnType<DataSource['merchant']['preferences']>>;
         }
       ).preferences;
-      return { brandColor: saved?.brandColor ?? '#c6ff34', feeMode: saved?.feeMode ?? 'merchant' };
+      return { brandColor: saved?.brandColor ?? '#c6ff34' };
     },
     async updatePreferences(update) {
       await writeMerchant();
       const s = await current();
       if (update.brandColor !== undefined && !/^#[0-9a-f]{6}$/i.test(update.brandColor))
         throw new DataError('invalid_colour', 'Use a six-digit hex colour, like #c6ff34.', 400);
-      if (update.feeMode !== undefined && update.feeMode !== 'merchant' && update.feeMode !== 'customer')
-        throw new DataError('invalid_fee_mode', 'Choose who pays the Pact fee.', 400);
       const saved = await mockSource.merchant.preferences();
-      const next = {
-        brandColor: update.brandColor?.toLowerCase() ?? saved.brandColor,
-        feeMode: update.feeMode ?? saved.feeMode,
-      };
+      const next = { brandColor: update.brandColor?.toLowerCase() ?? saved.brandColor };
       (
         s.merchant as typeof s.merchant & {
           preferences?: Awaited<ReturnType<DataSource['merchant']['preferences']>>;
         }
       ).preferences = next;
       return { ...next };
-    },
-    async depositGas(amountWei) {
-      await writeMerchant();
-      const s = await current();
-      const amount = validateMinor(amountWei, 'The deposit');
-      if (amount < WEI(0.001)) throw new DataError('deposit_too_small', 'Deposit at least 0.001 WBT.', 400);
-      if (amount > WEI(10))
-        throw new DataError('deposit_too_large', 'The demo accepts at most 10 WBT per deposit.', 400);
-      s.gas.balanceWei += amount;
-      s.merchant.onboarding.gas = true;
-      webhook(s, 'gas_tank.deposited', s.merchant.address);
-      return mockSource.merchant.gasTank();
     },
     async sendReminder(id, input) {
       await writeMerchant();
@@ -2023,7 +2078,6 @@ const source: DataSource = {
         payerAddress: null,
         txHash: null,
         feeMinor: 0n,
-        gasWei: 0n,
         paidAt: null,
         refunds: [],
         activity: [{ type: 'order.created', at: iso(now(s)), detail: 'Checkout started', txHash: null }],
@@ -2278,8 +2332,9 @@ const source: DataSource = {
       const financed = financingTransaction(s, hash);
       if (financed) return financed;
       const lower = hash.toLowerCase();
-      const gas = s.gas.ledger.find(g => g.txHash.toLowerCase() === lower);
+      const gas = s.relayed.find(g => g.txHash.toLowerCase() === lower);
       const entry = s.accounting.find(e => e.txHash?.toLowerCase() === lower);
+      const networkFee = s.accounting.find(e => e.type === 'Fee' && e.txHash?.toLowerCase() === lower);
       const refused = s.refusals.find(r => r.txHash?.toLowerCase() === lower);
       const ack = s.invoices.find(i => i.acknowledgement?.txHash?.toLowerCase() === lower);
       if (!gas && !entry && !refused) return null;
@@ -2289,7 +2344,7 @@ const source: DataSource = {
         ? (s.customers.find(c => c.email === entry.customer)?.address ??
           s.agents.find(a => a.session.name === entry.customer)?.session.account ??
           s.merchant.address)
-        : (gas?.objectId.split(':')[0] ?? s.merchant.address);
+        : (gas?.payer ?? s.merchant.address);
       const transfers: ExplorerTx['transfers'] = [];
       const financing = entry?.type.startsWith('Financing') ?? false;
       if (entry && !financing && entry.grossMinor > 0n) {
@@ -2314,6 +2369,13 @@ const source: DataSource = {
           amountMinor: (-entry.grossMinor).toString(),
           label: 'Refund to customer',
         });
+      if (networkFee)
+        transfers.push({
+          from: s.merchant.address,
+          to: '0x5e3f…fee',
+          amountMinor: networkFee.feeMinor.toString(),
+          label: 'Network fee, in USDT',
+        });
       const events: ExplorerTx['events'] = [];
       if (gas)
         events.push(
@@ -2321,7 +2383,9 @@ const source: DataSource = {
             name: 'Executed',
             detail: `Router executed a sponsored ${gas.action.replaceAll('_', ' ')} for ${gas.label}`,
           },
-          { name: 'Reimbursed', detail: `GasTank paid the relayer from ${s.merchant.name}'s tank` },
+          networkFee
+            ? { name: 'GasCharged', detail: `The Router took the refund's network fee from ${s.merchant.name} in USDT` }
+            : { name: 'Sponsored', detail: 'Pact’s relayer paid the gas' },
         );
       if (entry?.type === 'Payment' || entry?.type === 'Invoice')
         events.push({ name: 'Charged', detail: `PaymentEscrow captured ${dec6(entry.grossMinor)} USDT` });
@@ -2361,11 +2425,11 @@ const source: DataSource = {
         to: entry?.type === 'Subscription' ? SUBSCRIPTIONS : ROUTER,
         transfers,
         gasWei: gas?.gasWei ?? '0',
-        gasPaidBy: gas
-          ? `${s.merchant.name} gas tank`
-          : refused
-            ? 'No gas charged to the merchant (refused before execution)'
-            : 'Relayer',
+        gasPaidBy: refused
+          ? 'Nobody: refused before it was sent'
+          : networkFee
+            ? `Pact relayer, charged to ${s.merchant.name} in USDT`
+            : 'Pact relayer',
         events,
       };
     },

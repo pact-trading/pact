@@ -81,12 +81,12 @@ export function screenAreas(ids: ScreenIds): ScreenArea[] {
     },
     {
       area: 'Merchant: operate',
-      description: 'Agents, gas, security, books and settings.',
+      description: 'Agents, fees, security, books and settings.',
       screens: [
         m('Paid API', '/dashboard/paid-api'),
         m('Agent budgets', '/dashboard/agents'),
         m('Agent request', '/dashboard/agents/requests/req_001'),
-        m('Gas tank', '/dashboard/gas-tank'),
+        m('Fees', '/dashboard/fees'),
         m('Security', '/dashboard/security', 'Run the drain attack'),
         {
           title: 'Accounting and exports',

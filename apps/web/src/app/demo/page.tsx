@@ -36,7 +36,7 @@ const views: Array<{
     icon: IconBuildingStore,
     title: 'Merchant',
     who: 'Maya Chen · Kite Labs',
-    body: 'Products, orders and one-click refunds, invoices, capped subscriptions, the gas tank and exports.',
+    body: 'Products, orders and one-click refunds, invoices, capped subscriptions, fees and exports.',
     track: 'Operate',
   },
   {
@@ -72,7 +72,7 @@ const views: Array<{
     icon: IconShieldBolt,
     title: 'Attacker',
     who: 'A script against the relayer',
-    body: 'Replays, dust, arbitrary calldata and 50 fresh accounts try to drain the gas tank. Every attempt is refused.',
+    body: 'Replays, dust, arbitrary calldata and 50 fresh accounts try to make Pact pay for junk or spend the merchant’s USDT. Every attempt is refused.',
     track: 'Scale',
   },
   {
@@ -81,7 +81,7 @@ const views: Array<{
     icon: IconCalculator,
     title: 'Accountant',
     who: 'Priya Nair · Kite Labs books',
-    body: 'A read-only view: export every payment, refund, fee and gas cost, and check one row on the explorer.',
+    body: 'A read-only view: export every payment, refund and fee, gross and net, and check one row on the explorer.',
     track: 'Operate',
   },
   {
@@ -175,13 +175,13 @@ export default async function DemoPage({ searchParams }: { searchParams: Promise
           <h2 className="text-lg font-semibold">The story, in order</h2>
           <ol className="mt-4 grid gap-3 text-[15px] text-subtle-foreground sm:grid-cols-2">
             {[
-              'Merchant: set up checkout and fund the gas tank.',
+              'Merchant: set up checkout and sign Pact’s fee terms once.',
               'Customer: buy the website audit and subscribe to API Growth, with no crypto steps.',
               'Merchant: refund part of the audit; the customer sees it with its public record.',
               'Merchant: try an early renewal; the contract refuses it with a reason. Customer: cancel in one click.',
               'AI agent: ten paid API calls settle in USDT; the eleventh is refused over the daily cap.',
               'Customer: acknowledge invoice INV-1042, then move the clock 30 days and pay it.',
-              'Attacker: run the drain simulation; every attempt is refused and the tank does not move.',
+              'Attacker: run the drain simulation; every attempt is refused and the merchant’s USDT does not move.',
               'Merchant: request financing for INV-1060. Investor: buy it; the advance arrives less a reserve.',
               'Investor: try to transfer a claim to Northgate Fund; the contract refuses, it is not approved.',
               'Merchant: make Northwind pay INV-1060; the payment goes straight to the investor and the reserve comes back.',

@@ -1,7 +1,7 @@
 import 'server-only';
 import type { PlanSummary, RefusalEvent, SubscriptionDetail } from '@pactagent/core/platform-types';
 import { reasonDetail } from '@/lib/reasons';
-import { DataError } from '../errors';
+import { DataError, approvalUnavailable } from '../errors';
 import type {
   ApprovalSignature,
   AvailablePlan,
@@ -14,15 +14,13 @@ import type {
 } from '../types';
 import type { ApiKit } from './source';
 
+/** USDT permit readiness: when an allowance is missing, the EIP-2612 permit the customer signs. */
 type Approval = {
   status: 'needs_funding' | 'needs_approval' | 'ready' | 'pending' | 'unavailable';
   reason?: string;
-  message: string | null;
-  approvalNonce: string | null;
-  authorizationNonce: string | null;
+  permitNonce: string | null;
   deadline: string | null;
-  authorizationRequired: boolean;
-  delegate: string;
+  typedData: Record<string, unknown> | null;
   amount: string;
 };
 type SubscriptionIntent = {
@@ -41,7 +39,8 @@ const every = (seconds: number) =>
 
 /**
  * Subscriptions in live mode: merchant plans and renewals, the customer's own subscriptions and
- * cancellation, and the hosted subscribe page (approval first when needed, then the mandate).
+ * cancellation, and the hosted subscribe page (a USDT permit first when needed, then the mandate).
+ * The customer only signs; Pact's relayer submits everything and pays the gas.
  */
 export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, settled }: ApiKit) {
   const plan = (id: string) => `/v1/commerce/plans/${encodeURIComponent(id)}`;
@@ -87,15 +86,10 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
     }
     if (approval.status === 'needs_funding')
       throw new DataError('needs_funds', 'Your balance is too low for the first period.', 409);
-    if (
-      approval.status !== 'needs_approval' ||
-      !approval.message ||
-      !approval.approvalNonce ||
-      !approval.deadline
-    )
+    if (approval.status !== 'needs_approval' || !approval.typedData || !approval.deadline)
       throw new DataError(
         approval.reason ?? 'approval_unavailable',
-        'Subscribing is not available right now.',
+        approvalUnavailable(approval.reason, 'Subscribing is not available right now.'),
         409,
       );
     return hold(
@@ -103,21 +97,14 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
       {
         planId,
         approvalKey: intent.approvalKey,
-        approvalNonce: approval.approvalNonce,
+        permitNonce: approval.permitNonce,
         deadline: approval.deadline,
       },
       {
         title: `Subscribe to ${offer.plan.name}`,
         lines: [{ label: 'Allows renewals up to', value: usdt(approval.amount) }],
         typedData: {},
-        approval: {
-          message: approval.message,
-          delegate: approval.authorizationRequired ? approval.delegate : null,
-          nonce:
-            approval.authorizationRequired && approval.authorizationNonce !== null
-              ? Number(approval.authorizationNonce)
-              : null,
-        },
+        approval: { typedData: approval.typedData },
       },
     );
   }
@@ -181,11 +168,22 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
   };
 
   const change = (id: string) => `/v1/commerce/me/subscriptions/${encodeURIComponent(id)}`;
+  /** The change offer. Right after subscribing, the first charge may still be confirming: wait for it. */
+  async function changeIntent(id: string, planId: string, approvalKey?: string, seconds = 45) {
+    for (let i = 0; ; i++) {
+      try {
+        return await post<SubscriptionIntent>(`${change(id)}/change-intent`, {
+          planId,
+          ...(approvalKey ? { approvalKey } : {}),
+        });
+      } catch (error) {
+        if (!(error instanceof DataError) || error.code !== 'subscription_pending' || i >= seconds) throw error;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+  }
   async function prepareChange(id: string, planId: string, approvalKey?: string): Promise<SignRequest> {
-    const intent = await post<SubscriptionIntent>(`${change(id)}/change-intent`, {
-      planId,
-      ...(approvalKey ? { approvalKey } : {}),
-    });
+    const intent = await changeIntent(id, planId, approvalKey);
     const offer = await api<{ plan: { name: string } }>(plan(planId));
     const { approval } = intent;
     if (approval.status === 'pending') {
@@ -195,7 +193,7 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
     if (approval.status === 'needs_funding')
       throw new DataError('needs_funds', 'Your balance is too low for the new plan.', 409);
     if (approval.status === 'needs_approval') {
-      if (!approval.message || !approval.approvalNonce || !approval.deadline)
+      if (!approval.typedData || !approval.deadline)
         throw new DataError('approval_unavailable', 'Changing plans is not available right now.', 409);
       return hold(
         'change-approval',
@@ -203,28 +201,21 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
           id,
           planId,
           approvalKey: intent.approvalKey,
-          approvalNonce: approval.approvalNonce,
+          permitNonce: approval.permitNonce,
           deadline: approval.deadline,
         },
         {
           title: `Switch to ${offer.plan.name}`,
           lines: [{ label: 'Allows renewals up to', value: usdt(approval.amount) }],
           typedData: {},
-          approval: {
-            message: approval.message,
-            delegate: approval.authorizationRequired ? approval.delegate : null,
-            nonce:
-              approval.authorizationRequired && approval.authorizationNonce !== null
-                ? Number(approval.authorizationNonce)
-                : null,
-          },
+          approval: { typedData: approval.typedData },
         },
       );
     }
     if (approval.status !== 'ready')
       throw new DataError(
         approval.reason ?? 'approval_unavailable',
-        'Changing plans is not available right now.',
+        approvalUnavailable(approval.reason, 'Changing plans is not available right now.'),
         409,
       );
     return hold(
@@ -263,12 +254,16 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
         intent: unknown;
         data: string;
       };
-      await post(`${change(held.id)}/change`, {
-        planId: held.planId,
-        intent: held.intent,
-        data: held.data,
-        signature,
-      });
+      // The signed swap stays valid for five minutes: if a charge started meanwhile, wait for it.
+      for (let i = 0; ; i++) {
+        try {
+          await post(`${change(held.id)}/change`, { planId: held.planId, intent: held.intent, data: held.data, signature });
+          break;
+        } catch (error) {
+          if (!(error instanceof DataError) || error.code !== 'subscription_pending' || i >= 45) throw error;
+          await new Promise(r => setTimeout(r, 1000));
+        }
+      }
       const done = await settled(
         () => customer.subscription(held.id),
         s => s.status === 'cancelled',
@@ -283,17 +278,18 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
     subscription: id => api<SubscriptionDetail>(`/v1/commerce/me/subscriptions/${encodeURIComponent(id)}`),
     availablePlans: async () =>
       (await api<{ data: AvailablePlan[] }>('/v1/commerce/me/available-plans')).data,
+    // The customer signs a cancellation of the on-chain subscription; Pact's relayer submits it.
     async prepareCancel(id) {
       const [current, request] = await Promise.all([
         customer.subscription(id),
-        post<{ data: string; intent: Record<string, unknown>; typedData: Record<string, unknown> }>(
+        post<{ deadline: string; typedData: Record<string, unknown> }>(
           `/v1/commerce/me/subscriptions/${encodeURIComponent(id)}/cancel-intent`,
           {},
         ),
       ]);
       return hold(
         'cancel',
-        { id, data: request.data, intent: request.intent },
+        { id, deadline: request.deadline },
         {
           title: 'Cancel subscription',
           lines: [
@@ -305,10 +301,9 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
       );
     },
     async submitCancel(token, signature) {
-      const held = (await take('cancel', token)) as { id: string; data: string; intent: unknown };
+      const held = (await take('cancel', token)) as { id: string; deadline: string };
       await post(`/v1/commerce/me/subscriptions/${encodeURIComponent(held.id)}/cancel`, {
-        intent: held.intent,
-        data: held.data,
+        deadline: held.deadline,
         signature,
       });
       return settled(
@@ -388,16 +383,15 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
         id: string;
         planId: string;
         approvalKey: string;
-        approvalNonce: string;
+        permitNonce: string | null;
         deadline: string;
       };
       await post(`${change(held.id)}/change-approval`, {
         planId: held.planId,
         approvalKey: held.approvalKey,
-        approvalNonce: held.approvalNonce,
         deadline: held.deadline,
         signature: approval.signature,
-        ...(approval.authorization && { authorization: approval.authorization }),
+        ...(held.permitNonce !== null && { nonce: held.permitNonce }),
       });
       await waitForApproval(held.planId, held.approvalKey, 45, held.id);
       return prepareChange(held.id, held.planId, held.approvalKey);
@@ -407,15 +401,14 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
       const held = (await take('subscribe-approval', token)) as {
         planId: string;
         approvalKey: string;
-        approvalNonce: string;
+        permitNonce: string | null;
         deadline: string;
       };
       await post(`${plan(held.planId)}/approval`, {
         approvalKey: held.approvalKey,
-        approvalNonce: held.approvalNonce,
         deadline: held.deadline,
         signature: approval.signature,
-        ...(approval.authorization && { authorization: approval.authorization }),
+        ...(held.permitNonce !== null && { nonce: held.permitNonce }),
       });
       await waitForApproval(held.planId, held.approvalKey);
       return prepareSubscribe(held.planId, held.approvalKey);

@@ -12,7 +12,7 @@ import { Notice } from '@/components/ui/notice';
 import { PageHeader } from '@/components/ui/page-header';
 import { Timeline } from '@/components/ui/timeline';
 import { txUrl } from '@/lib/explorer';
-import { dateTime, humanize, money, usd, wbt } from '@/lib/format';
+import { dateTime, humanize, money, usd } from '@/lib/format';
 import { getData } from '@/server/data';
 import { isNotWired, load } from '@/server/load';
 import { getViewer } from '@/server/viewer';
@@ -124,14 +124,13 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                         {
                           label: 'Pact fee',
                           value: usd(fee),
-                          hint: `${(Number((fee * 10_000n) / (total || 1n)) / 100).toFixed(2)}% taken in the same transaction`,
+                          hint: `${(Number((fee * 10_000n) / (total || 1n)) / 100).toFixed(2)}% taken out of the payment`,
                         },
                         { label: 'Refunded', value: usd(refunded) },
-                        { label: 'Net to you', value: usd(total - fee - refunded) },
                         {
-                          label: 'Gas',
-                          value: wbt(payment.gasWei, 6),
-                          hint: 'Paid from your gas tank. The customer paid none.',
+                          label: 'Net to you',
+                          value: usd(total - fee - refunded),
+                          hint: 'Pact paid the gas. The customer paid no fee and no gas.',
                         },
                         {
                           label: 'Payment id',

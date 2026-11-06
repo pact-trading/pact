@@ -32,12 +32,12 @@ export default async function SecurityPage() {
     <>
       <PageHeader
         title="Security"
-        description="What stops someone draining your gas tank. Five limits live in the contracts, three in the relayer, and every refusal is recorded with its reason."
+        description="What stops someone spending your money or making Pact pay for junk. Five limits live in the contracts, three in the relayer, and every refusal is recorded with its reason."
       />
       <Card>
         <CardHeader
           title="Drain attack"
-          description="The same script judges can run. It fails, and the tank only moves for real payments."
+          description="The same script judges can run. It fails, and your USDT only moves on calls you sign."
         />
         <CardBody>
           <DrainSimulation readOnly={viewer?.role !== 'merchant'} />

@@ -27,7 +27,7 @@ export default async function LocalAddressPage({ params }: { params: Promise<{ a
     !code || code === '0x'
       ? 'Account'
       : code.startsWith('0xef0100')
-        ? 'Account with delegated code (EIP-7702)'
+        ? 'Account with delegated code'
         : 'Contract';
   const row = (label: string, value: React.ReactNode) => (
     <div className="flex flex-wrap items-baseline justify-between gap-3 border-b border-border-subtle py-2.5 last:border-0">

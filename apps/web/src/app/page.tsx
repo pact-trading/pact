@@ -43,8 +43,8 @@ const points = [
   },
   {
     icon: IconShieldCheck,
-    title: 'Gas paid by the business, safely',
-    body: 'Each merchant funds its own gas tank. Eight layered limits, five of them in the contracts, stop anyone draining it.',
+    title: 'One fee, taken from the payment',
+    body: 'Pact takes 0.8% of a checkout payment (at least 0.15 USDT), 0.5% of an invoice (at most 10 USDT), and pays the gas. Nobody holds WBT; eight layered limits stop anyone spending a merchant’s money.',
   },
 ];
 
@@ -73,7 +73,8 @@ export default function Home() {
           </h1>
           <p className="mx-auto mt-5 max-w-2xl text-lg text-muted-foreground">
             Checkout, payment links, invoices, subscriptions and agent payments for businesses on Whitechain,
-            with gas paid by you and zero crypto steps for the people paying you.
+            with one fee taken from each payment and zero crypto steps for the people paying you. Nobody
+            buys gas.
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <Button asChild variant="primary" size="lg">

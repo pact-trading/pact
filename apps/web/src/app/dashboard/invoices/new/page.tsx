@@ -32,7 +32,6 @@ export default async function NewInvoicePage() {
         merchantName={settings.brandName}
         logoUrl={settings.logoUrl}
         brandColor={isNotWired(preferences) ? undefined : preferences.brandColor}
-        feeMode={isNotWired(preferences) ? undefined : preferences.feeMode}
       />
     </>
   );

@@ -51,7 +51,7 @@ export default async function ExportsPage({
     <>
       <PageHeader
         title="Exports"
-        description="Every payment, refund, fee and gas cost in one ledger, with a link to its public record. Columns match QuickBooks and Xero CSV import."
+        description="Every payment, refund and fee in one ledger: gross, Pact’s fee and net, with a link to its public record. Columns match QuickBooks and Xero CSV import."
         actions={
           <>
             <Button asChild size="sm">
@@ -90,12 +90,12 @@ export default async function ExportsPage({
       </Card>
       <StatGrid>
         <Stat label="Gross" value={usdDecimal(report.totals.grossUSDT)} hint="After refunds" />
-        <Stat label="Pact fees" value={usdDecimal(report.totals.feesUSDT)} />
-        <Stat label="Net USDT" value={usdDecimal(report.totals.netUSDT)} />
+        <Stat label="Pact fees" value={usdDecimal(report.totals.feesUSDT)} hint="Taken from each payment" />
+        <Stat label="Net USDT" value={usdDecimal(report.totals.netUSDT)} hint="What reached your wallet" />
         <Stat
-          label="Gas paid"
-          value={`${Number(report.totals.gasWBT).toFixed(5)} WBT`}
-          hint="From the gas tank, not from revenue"
+          label="Gas you paid"
+          value="None"
+          hint="Pact pays it; a refund’s network fee is in Pact fees, in USDT"
         />
       </StatGrid>
       <div className="mt-6">

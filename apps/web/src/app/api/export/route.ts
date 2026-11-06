@@ -16,8 +16,6 @@ const columns = [
   'Discount Code',
   'Fee USDT',
   'Net USDT',
-  'Gas Cost WBT',
-  'Gas Cost USD Estimate',
   'Refund Of',
   'Financing Status',
   'Transaction Hash',
@@ -63,7 +61,6 @@ export async function GET(request: Request) {
       'Discount USDT': report.totals.discountsUSDT ?? null,
       'Fee USDT': report.totals.feesUSDT,
       'Net USDT': report.totals.netUSDT,
-      'Gas Cost WBT': report.totals.gasWBT,
       'Token Balance Change USDT': report.totals.tokenDeltaUSDT,
     };
     const content =

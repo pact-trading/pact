@@ -73,7 +73,7 @@ export function InvestorApplication({ applied }: { applied: boolean }) {
   );
 }
 
-/** Local fork only: test USDT to invest with and WBT for gas, standing in for the faucet and a DEX swap. */
+/** Local fork only: test USDT to invest with, standing in for the faucet. Pact pays the gas. */
 export function InvestorTestFunds({ address }: { address: string }) {
   const auth = usePactAuth();
   const router = useRouter();

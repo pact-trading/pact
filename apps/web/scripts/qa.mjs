@@ -24,7 +24,7 @@ const screens = [
   ['merchant', '/dashboard/invoices/new', 'merchant-invoice-new'],
   ['merchant', '/dashboard/subscriptions', 'merchant-subscriptions'],
   ['merchant', '/dashboard/paid-api', 'merchant-paid-api'],
-  ['merchant', '/dashboard/gas-tank', 'merchant-gas-tank'],
+  ['merchant', '/dashboard/fees', 'merchant-fees'],
   ['merchant', '/dashboard/security', 'merchant-security'],
   ['merchant', '/dashboard/developers', 'merchant-developers'],
   ['merchant', '/dashboard/developers?tab=webhooks', 'merchant-webhooks'],

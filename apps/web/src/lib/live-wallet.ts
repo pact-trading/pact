@@ -1,7 +1,6 @@
 'use client';
 
 import {
-  createPublicClient,
   createWalletClient,
   custom,
   defineChain,
@@ -26,9 +25,9 @@ export interface LiveConfig {
       router: Address;
       escrow: Address;
       subscription: Address;
-      gasTank: Address | null;
+      /** The FeeSchedule: the fee terms merchants sign. */
+      fees: Address;
       usdt: Address;
-      sponsoredApprover: Address;
       /** Invoice financing, when deployed. */
       receivables?: Address | null;
       investorRegistry?: Address | null;
@@ -58,7 +57,7 @@ declare global {
 }
 
 export type MerchantWalletKind = 'injected' | 'local';
-/** Sides that sign in with a wallet and send their own transactions. */
+/** Sides that sign in with a wallet. They only sign: Pact's relayer sends their transactions. */
 export type WalletRole = 'merchant' | 'investor' | 'compliance';
 type LocalRole = WalletRole | 'customer';
 const KEYS = {
@@ -132,45 +131,6 @@ export async function injectedAccount(
 
 export function localClient(account: PrivateKeyAccount, config: LiveConfig): WalletClient {
   return createWalletClient({ account, chain: chainFor(config.rpcUrl), transport: http(config.rpcUrl) });
-}
-
-/**
- * Sends prepared transactions from a wallet one after another, waiting for each to confirm (a purchase
- * needs its USDT approval mined first). Returns their hashes in order.
- */
-export async function sendPrepared(
-  client: WalletClient,
-  config: LiveConfig,
-  transactions: Array<{ to: string; data: string }>,
-): Promise<Hex[]> {
-  const reader = createPublicClient({ chain: chainFor(config.rpcUrl), transport: http(config.rpcUrl) });
-  const hashes: Hex[] = [];
-  for (const tx of transactions) {
-    let hash: Hex;
-    try {
-      hash = await client.sendTransaction({
-        account: client.account!,
-        chain: chainFor(config.rpcUrl),
-        to: tx.to as Address,
-        data: tx.data as Hex,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '';
-      // The wallet pays its own gas: a wallet without WBT cannot send anything.
-      if (/insufficient funds|exceeds allowance: 0|exceeds the balance/i.test(message))
-        throw new Error(
-          config.localFork
-            ? 'This wallet has no WBT to pay for gas. Use the test faucet, then try again.'
-            : 'This wallet has no WBT to pay for gas. Claim some at faucet.testnet.whitechain.io, then try again.',
-        );
-      throw error;
-    }
-    const receipt = await reader.waitForTransactionReceipt({ hash, timeout: 120_000 });
-    if (receipt.status !== 'success')
-      throw new Error('The transaction was reverted on chain. Nothing was bought or sent.');
-    hashes.push(hash);
-  }
-  return hashes;
 }
 
 /** Signs a one-time login message (EIP-4361) and exchanges it for a session cookie. */

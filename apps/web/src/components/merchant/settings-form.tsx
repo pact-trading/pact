@@ -6,14 +6,12 @@ import { useState, useTransition } from 'react';
 import type { MerchantSettings } from '@pactagent/core/api-types';
 import type { MerchantPreferences } from '@/server/data/types';
 import { updatePreferences, updateSettings } from '@/server/actions/merchant';
-import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardBody, CardHeader } from '../ui/card';
 import { CopyButton } from '../ui/copy-button';
 import { Field, Input } from '../ui/field';
 import { Notice } from '../ui/notice';
 import { useToast } from '../ui/toast';
-import { RadioCards } from '../portal/radio-cards';
 import { inkOn } from './invoices/invoice-preview';
 
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -64,7 +62,7 @@ function BrandMark({
 }
 
 /**
- * Brand, refund policy, fees and payout. Fields start from the saved settings and the page
+ * Brand, refund policy and payout. Fields start from the saved settings and the page
  * remounts the form after a save, so it always shows what is stored, never seed values.
  */
 export function SettingsForm({
@@ -73,7 +71,7 @@ export function SettingsForm({
   readOnly,
 }: {
   settings: MerchantSettings;
-  /** Null when the data source cannot store brand colour and fee mode yet. */
+  /** Null when the data source cannot store the brand colour. */
   preferences: MerchantPreferences | null;
   readOnly: boolean;
 }) {
@@ -83,7 +81,6 @@ export function SettingsForm({
   const [logo, setLogo] = useState(settings.logoUrl ?? '');
   const [color, setColor] = useState(preferences?.brandColor ?? '#c6ff34');
   const [days, setDays] = useState(String(Math.round(settings.refundWindowSeconds / 86_400)));
-  const [feeMode, setFeeMode] = useState<MerchantPreferences['feeMode']>(preferences?.feeMode ?? 'merchant');
   const [tried, setTried] = useState(false);
   const [error, setError] = useState('');
   const [pending, start] = useTransition();
@@ -110,7 +107,7 @@ export function SettingsForm({
       });
       if (!saved.ok) return setError(saved.error.message);
       if (preferences) {
-        const prefs = await updatePreferences({ brandColor: color, feeMode });
+        const prefs = await updatePreferences({ brandColor: color });
         if (!prefs.ok) return setError(prefs.error.message);
       }
       toast('Settings saved');
@@ -223,39 +220,6 @@ export function SettingsForm({
             </fieldset>
           </CardBody>
         </Card>
-
-        {preferences && (
-          <Card>
-            <CardHeader
-              title="Fee mode"
-              description="Who carries the 1% Pact fee on new invoices."
-              action={<Badge tone="outline">Demo</Badge>}
-            />
-            <CardBody>
-              <RadioCards
-                legend="Who pays the fee"
-                value={feeMode}
-                onChange={setFeeMode}
-                disabled={readOnly}
-                options={[
-                  {
-                    value: 'merchant',
-                    title: 'I absorb the fee',
-                    body: 'Customers pay the price you set. The fee comes out of your payout.',
-                  },
-                  {
-                    value: 'customer',
-                    title: 'Customer pays the fee',
-                    body: 'New invoices get a payment processing fee line, so your payout nets the full amount.',
-                  },
-                ]}
-              />
-              <p className="mt-3 text-[13px] text-muted-foreground">
-                Product checkouts always charge the product price. Network gas is set on the gas tank page.
-              </p>
-            </CardBody>
-          </Card>
-        )}
 
         <Card>
           <CardHeader

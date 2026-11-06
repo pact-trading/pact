@@ -12,12 +12,12 @@ test('AI agent pays ten x402 calls in USDT and the eleventh is refused over its 
   await expect(page.getByRole('cell', { name: /Research agent/ }).first()).toBeVisible();
 });
 
-test('drain attack: every attempt is refused and the tank does not move', async ({ page }) => {
+test('drain attack: every attempt is refused and the merchant’s USDT does not move', async ({ page }) => {
   await viewAs(page, 'merchant');
   await page.goto('/dashboard/security');
   await page.getByRole('button', { name: 'Run the drain attack' }).click();
   await expect(page.getByText(/All \d+ attempts refused/)).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByText('Unchanged. Only real payments move the tank.')).toBeVisible();
+  await expect(page.getByText('Unchanged. Only calls you sign can spend it.')).toBeVisible();
 });
 
 test('accountant gets a read-only view and an export that reconciles', async ({ page }) => {

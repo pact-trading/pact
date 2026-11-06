@@ -35,7 +35,7 @@ const walletCall = async (cookieName, path, body) => {
   });
   return r.json();
 };
-/** Investors only sign; Pact's relayer pays their gas, so their wallets hold no WBT. */
+/** Merchants and investors only sign; Pact's relayer pays their gas, so their wallets hold no WBT. */
 const holdsNoGas = async address => {
   const rpc = process.env.PACT_LIVE_RPC ?? 'http://127.0.0.1:8545';
   const response = await fetch(rpc, {
@@ -71,7 +71,7 @@ try {
     )
       await wait(500);
   });
-  await step('merchant: request financing (the wallet sends the listing)', async () => {
+  await step('merchant: request financing (signed, relayed, no gas)', async () => {
     await page.getByRole('button', { name: /^Business 0x/ }).click();
     await page.waitForURL(`${base}/dashboard`);
     await page.goto(`${base}/dashboard/financing/${invoice.id}`);
@@ -79,6 +79,8 @@ try {
     await page.getByRole('dialog').getByRole('button', { name: 'Request financing' }).click();
     await toastWait('listed for investors');
     await shot('70-financing-listed');
+    // The merchant only signed the listing: Pact's relayer sent it.
+    if (!testnet) await holdsNoGas((await call('merchant', '/v1/config')).merchant);
   });
   const investor = await step('investor: connect a test wallet and apply', async () => {
     await page.goto(`${base}/login`);

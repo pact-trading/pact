@@ -1,10 +1,13 @@
 import type {
   DashboardSummary,
   ExportReport,
+  FeeLedgerEntry,
   FeePreview,
+  FeesDetail,
   InvoiceRequest,
   MerchantSettings,
   MerchantSettingsUpdate,
+  MerchantSpender,
   SubscriptionPlanRequest,
   WebhookDelivery,
   WebhookEvent,
@@ -19,9 +22,6 @@ import type {
   CustomerSummary,
   DrainRun,
   FacilitatorStatus,
-  GasLedgerEntry,
-  GasPolicy,
-  GasTankDetail,
   InvoiceDetail,
   OnboardingStep,
   OrderListItem,
@@ -52,15 +52,10 @@ export interface SignRequest {
   /** Who signs: the merchant's wallet or the customer's account. Defaults to the customer. */
   signer?: 'merchant' | 'customer' | 'investor' | 'compliance';
   /**
-   * Transactions the signer's own wallet sends, in order, instead of a signature (invoice financing:
-   * listing, buying, transfers, registry decisions). The submit receives their hashes as a JSON array.
+   * The customer's one-time USDT approval, collected in the same confirmation before the payment
+   * signature: an EIP-2612 permit (JSON-safe typed data) that Pact's relayer submits.
    */
-  transactions?: Array<{ to: string; data: string; label: string }>;
-  /**
-   * The customer's one-time USDT approval, collected in the same confirmation before the
-   * payment signature: a raw digest to sign and, the first time, an EIP-7702 authorization.
-   */
-  approval?: { message: string; delegate: string | null; nonce: number | null };
+  approval?: { typedData: Record<string, unknown> };
   /** More EIP-712 messages signed in the same confirmation; the submit receives all signatures as a JSON array. */
   also?: Array<Record<string, unknown>>;
   /** This signature is a first step: `continueSigned` turns it into the next request, in the same confirmation. */
@@ -91,8 +86,8 @@ export interface OrderDetail {
   payment: {
     id: string;
     txHash: string | null;
+    /** Pact's fee, taken out of the payment. */
     feeMinor: string;
-    gasWei: string;
     payer: string | null;
     /** How the customer paid. Card, bank and own-wallet payments exist in the demo sandbox only. */
     method?: PaymentMethodUsed;
@@ -321,10 +316,15 @@ export interface MerchantData {
 
   refusals(filter?: { source?: string; limit?: number }): Promise<RefusalEvent[]>;
 
-  gasTank(): Promise<GasTankDetail>;
-  gasLedger(limit?: number): Promise<GasLedgerEntry[]>;
-  updateGasPolicy(update: Partial<GasPolicy>): Promise<GasTankDetail>;
-  claimFaucet(): Promise<GasTankDetail>;
+  /** Pact's fee terms as the merchant signed them, its standing permits, 30-day totals and fees. */
+  fees(): Promise<FeesDetail>;
+  feeLedger(limit?: number): Promise<FeeLedgerEntry[]>;
+  /** The latest fee terms to sign, once. Pact's relayer submits the signature. */
+  prepareAcceptTerms(): Promise<SignRequest>;
+  submitAcceptTerms(token: string, signature: string): Promise<FeesDetail>;
+  /** One standing USDT permit (refunds, then their network fee). Refused when it is already in place. */
+  preparePermit(spender: MerchantSpender): Promise<SignRequest>;
+  submitPermit(token: string, signature: string): Promise<FeesDetail>;
 
   securityLayers(): Promise<SecurityLayer[]>;
   runDrainSimulation(): Promise<DrainRun>;
@@ -347,11 +347,9 @@ export interface MerchantData {
   exportReport(range: { from?: string; to?: string }): Promise<ExportReport>;
 
   // Merchant polish. Mock only until the API has endpoints for them.
-  /** Brand colour and fee mode, which MerchantSettings cannot carry yet. */
+  /** Brand colour, which MerchantSettings does not carry. */
   preferences(): Promise<MerchantPreferences>;
   updatePreferences(update: Partial<MerchantPreferences>): Promise<MerchantPreferences>;
-  /** Moves WBT from the merchant's payout account into the gas tank. */
-  depositGas(amountWei: string): Promise<GasTankDetail>;
   /** A written reminder, sent now or at `sendAt`. */
   sendReminder(id: string, input: { message: string; sendAt: string | null }): Promise<ManualReminder>;
   /** The invoice's written reminders; scheduled ones whose time has come are sent first. */
@@ -366,12 +364,10 @@ export interface MerchantData {
   submitCancelSubscription(token: string, signature: string): Promise<SubscriptionDetail>;
 }
 
-/** Settings the API's MerchantSettings cannot carry yet. Kept in the demo sandbox. */
+/** Settings the API's MerchantSettings does not carry (`/v1/preferences`). */
 export interface MerchantPreferences {
   /** `#rrggbb`, used as the button colour on customer previews. */
   brandColor: string;
-  /** Who carries the Pact fee on new invoices: the merchant, or the customer as a fee line. */
-  feeMode: 'merchant' | 'customer';
 }
 
 /** A reminder the merchant wrote, sent at once or scheduled. */
@@ -460,7 +456,7 @@ export interface CheckoutData {
   session(id: string): Promise<CheckoutState>;
   preparePayment(sessionId: string): Promise<SignRequest>;
   /**
-   * Live mode: submits the customer's one-time USDT approval (relayed, no gas for them), waits for it
+   * Live mode: submits the customer's signed USDT permit (Pact's relayer pays the gas), waits for it
    * to confirm, and returns the payment signature request that follows it in the same confirmation.
    */
   submitApproval?(token: string, approval: ApprovalSignature): Promise<SignRequest>;
@@ -477,9 +473,9 @@ export interface CheckoutData {
   submitSubscribe(token: string, signature: string): Promise<{ subscriptionId: string }>;
 }
 
+/** The customer's signature over the permit in `SignRequest.approval`. */
 export interface ApprovalSignature {
   signature: string;
-  authorization?: { address: string; chainId: number; nonce: number; r: string; s: string; yParity?: number };
 }
 
 /** A synthetic transaction, rendered by the mock explorer. */

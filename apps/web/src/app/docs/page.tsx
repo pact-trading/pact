@@ -110,8 +110,8 @@ export default async function DocsPage() {
         <p className="text-sm font-medium text-muted-foreground">Docs</p>
         <h1 className="mt-1 text-[34px] leading-tight font-semibold sm:text-5xl">Quickstart</h1>
         <p className="mt-3 max-w-2xl text-[17px] text-muted-foreground">
-          Take your first USDT payment in four steps. Customers pay in dollars with a passkey; you pay the
-          network fee from your gas tank; your server fulfils from a signed webhook.
+          Take your first USDT payment in four steps. Customers pay in dollars with a passkey and never pay gas;
+          Pact’s fee comes out of the payment; your server fulfils from a signed webhook.
         </p>
         <nav aria-label="Steps" className="mt-6 flex flex-wrap gap-1.5">
           {steps.map((step, index) => (
@@ -136,7 +136,11 @@ export default async function DocsPage() {
               >
                 Integration · API keys
               </Link>{' '}
-              and set it on your server with the API address.
+              and set it on your server with the API address. Sign Pact’s fee terms once on the{' '}
+              <Link href="/dashboard/fees" className="font-medium underline underline-offset-4">
+                Fees
+              </Link>{' '}
+              page: until you do, payments to you are refused.
             </p>
             <CodeBlock title="terminal" code="pnpm add @pactagent/node @pactagent/checkout-react" />
             <CodeBlock

@@ -32,7 +32,7 @@ export function RefreshHeader({
         <a href={`${anchorBase}#checkout`}>{'Checkout'}</a>
         <a href={`${anchorBase}#subscriptions`}>{'Subscriptions'}</a>
         <a href={`${anchorBase}#agents`}>{'Agents'}</a>
-        <a href={`${anchorBase}#gas`}>{'Gas tank'}</a>
+        <a href={`${anchorBase}#fees`}>{'Fees'}</a>
         <a href={DOCS_URL} target={'_blank'} rel={'noopener'}>
           {'Docs'}
         </a>

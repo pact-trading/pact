@@ -4,14 +4,13 @@ import {
   PrivyProvider,
   usePrivy,
   useSignTypedData,
-  useSign7702Authorization,
   useWallets,
 } from '@privy-io/react-auth';
-import { defineChain, createWalletClient, custom, type Hex } from 'viem';
+import { defineChain, type Hex } from 'viem';
 import type { IdentitySession as PactIdentity } from '@pactagent/core/api-types';
 import { createContext } from 'react';
 
-/** The customer's Privy account: email sign-in, an embedded wallet, message signing. */
+/** The customer's Privy account: email sign-in, an embedded wallet, typed-data signing. */
 export interface PrivyCustomer {
   ready: boolean;
   authenticated: boolean;
@@ -19,15 +18,8 @@ export interface PrivyCustomer {
   error: string;
   login(): void;
   signOut(): Promise<void>;
+  /** Signs EIP-712 typed data: payments, mandates, cancellations and USDT permits. */
   signTyped(typedData: Record<string, unknown>): Promise<Hex>;
-  approve(
-    message: Hex,
-    delegate?: Hex,
-    nonce?: number,
-  ): Promise<{
-    signature: Hex;
-    authorization?: { address: Hex; chainId: number; nonce: number; r: Hex; s: Hex; yParity?: number };
-  }>;
 }
 export const PrivyCustomerContext = createContext<PrivyCustomer | null>(null);
 
@@ -47,11 +39,7 @@ async function clearSession() {
 function SessionBridge({ children }: { children: React.ReactNode }) {
   const { ready, authenticated, user, getAccessToken, login, logout } = usePrivy();
   const { signTypedData } = useSignTypedData();
-  const { signAuthorization } = useSign7702Authorization();
   const { wallets } = useWallets();
-  // Read through a ref: a click can come before the wallet list loads, and must see it once it does.
-  const latestWallets = useRef(wallets);
-  latestWallets.current = wallets;
   const walletReadyKey = wallets.map(w => `${w.walletClientType}:${w.address}`).join(',');
   const [identity, setIdentity] = useState<PactIdentity | null>(null);
   const [error, setError] = useState('');
@@ -141,40 +129,6 @@ function SessionBridge({ children }: { children: React.ReactNode }) {
     const verified = await refresh();
     return (await signTypedData(input, { address: verified.wallet.address })).signature;
   };
-  const approve = async (message: Hex, delegate?: Hex, nonce?: number) => {
-    const verified = await refresh();
-    const find = () =>
-      latestWallets.current.find(
-        w =>
-          w.walletClientType === 'privy' && w.address.toLowerCase() === verified.wallet.address.toLowerCase(),
-      );
-    let wallet = find();
-    for (let i = 0; i < 50 && !wallet; i++) {
-      await new Promise(r => setTimeout(r, 200));
-      wallet = find();
-    }
-    if (!wallet) throw new Error('Your payment wallet is not ready.');
-    const client = createWalletClient({
-      account: verified.wallet.address as Hex,
-      chain: whitechain,
-      transport: custom(await wallet.getEthereumProvider()),
-    });
-    // Sign the exact raw digest expected by SponsoredApprover (not its hex text).
-    const signature = await client.signMessage({ message: { raw: message } });
-    if (!delegate) return { signature };
-    const {
-      address,
-      chainId,
-      nonce: signedNonce,
-      r,
-      s,
-      yParity,
-    } = await signAuthorization(
-      { contractAddress: delegate, chainId: 1874, nonce },
-      { address: verified.wallet.address },
-    );
-    return { signature, authorization: { address, chainId, nonce: signedNonce, r, s, yParity } };
-  };
   return (
     <PrivyCustomerContext.Provider
       value={{
@@ -186,7 +140,6 @@ function SessionBridge({ children }: { children: React.ReactNode }) {
         signOut,
         signTyped: async (typedData: Record<string, unknown>) =>
           (await signTyped(typedData as unknown as TypedRequest)) as Hex,
-        approve,
       }}
     >
       {children}

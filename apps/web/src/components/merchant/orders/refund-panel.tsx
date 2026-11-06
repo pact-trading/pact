@@ -142,8 +142,8 @@ export function RefundPanel({
         </Notice>
       )}
       <p className="text-[13px] text-muted-foreground">
-        You confirm with your passkey. The relayer sends the refund and your gas tank pays the network fee.
-        The customer sees it in their portal right away.
+        You confirm with your passkey. Pact sends the refund from your wallet and takes its network fee, a
+        fraction of a cent, in USDT. The customer sees it in their portal right away.
       </p>
     </form>
   );
@@ -324,7 +324,7 @@ export function RefundDialog({
             </Notice>
           )}
           <p className="text-[13px] text-muted-foreground">
-            You confirm with your passkey next. Your gas tank pays the network fee.
+            You confirm with your passkey next. Its network fee is taken from your wallet in USDT.
           </p>
         </form>
       </Dialog>

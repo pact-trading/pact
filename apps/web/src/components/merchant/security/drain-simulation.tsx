@@ -5,20 +5,23 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, useTransition } from 'react';
 import type { DrainAttack, DrainRun } from '@pactagent/core/platform-types';
 import { runDrainSimulation } from '@/server/actions/merchant';
-import { humanize, shortHash, wbt } from '@/lib/format';
+import { humanize, shortHash, usd } from '@/lib/format';
 import { Button } from '../../ui/button';
 import { Notice } from '../../ui/notice';
+
+/** The merchant's USDT balance, or a dash when it could not be read. */
+const balance = (minor: string | null) => (minor === null ? '—' : usd(minor));
 
 const attackLabel: Record<DrainAttack, string> = {
   replay: 'Replays',
   dust: 'Dust payments',
   arbitrary_calldata: 'Arbitrary calldata',
-  spam_accounts: '50 fresh accounts',
-  over_daily_cap: 'Over the daily cap',
+  spend_merchant_funds: 'Strangers spending your USDT',
+  over_gas_cap: 'Over the gas cap',
   stale_deadline: 'Stale deadlines',
 };
 
-/** Runs the drain script against the mock relayer and replays the attempts one by one. */
+/** Runs the drain script against the relayer and replays the attempts one by one. */
 export function DrainSimulation({ readOnly }: { readOnly: boolean }) {
   const router = useRouter();
   const [run, setRun] = useState<DrainRun | null>(null);
@@ -73,8 +76,8 @@ export function DrainSimulation({ readOnly }: { readOnly: boolean }) {
           </Button>
         )}
         <p className="text-sm text-muted-foreground">
-          Replays, dust, arbitrary calldata, 50 fresh accounts, over-cap spam and stale deadlines, sent
-          straight at the relayer.
+          Replays, dust, arbitrary calldata, gas-heavy calls, 50 fresh accounts signing refunds of your USDT
+          and stale deadlines, sent straight at the relayer.
         </p>
       </div>
       {error && <Notice tone="danger">{error}</Notice>}
@@ -113,28 +116,28 @@ export function DrainSimulation({ readOnly }: { readOnly: boolean }) {
               role="status"
             >
               {done
-                ? 'No transaction was sent for the attacker, so the tank paid nothing.'
-                : 'Each attempt is checked against the limits before any gas is spent.'}
+                ? 'No transaction was sent for the attacker, and none of your USDT moved.'
+                : 'Each attempt is checked against the limits before anything is sent.'}
             </Notice>
             <div className="rounded-2xl border border-border p-4 text-sm">
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Tank before</span>
-                <span className="font-medium">{wbt(run.tankBeforeWei, 6)}</span>
+                <span className="text-muted-foreground">Your USDT before</span>
+                <span className="font-medium">{balance(run.merchantBalanceBeforeMinor)}</span>
               </div>
               <div className="mt-1 flex justify-between">
-                <span className="text-muted-foreground">Tank after</span>
-                <span className="font-medium">{done ? wbt(run.tankAfterWei, 6) : '…'}</span>
+                <span className="text-muted-foreground">Your USDT after</span>
+                <span className="font-medium">{done ? balance(run.merchantBalanceAfterMinor) : '…'}</span>
               </div>
-              {done && (
+              {done && run.merchantBalanceBeforeMinor !== null && run.merchantBalanceAfterMinor !== null && (
                 <p className="mt-2 flex items-center gap-1.5 text-success">
-                  {run.tankBeforeWei === run.tankAfterWei ? (
+                  {run.merchantBalanceBeforeMinor === run.merchantBalanceAfterMinor ? (
                     <IconShieldCheck className="size-4" />
                   ) : (
                     <IconShieldX className="size-4" />
                   )}
-                  {run.tankBeforeWei === run.tankAfterWei
-                    ? 'Unchanged. Only real payments move the tank.'
-                    : 'Changed only by legitimate payments.'}
+                  {run.merchantBalanceBeforeMinor === run.merchantBalanceAfterMinor
+                    ? 'Unchanged. Only calls you sign can spend it.'
+                    : 'Changed only by real payments that arrived meanwhile.'}
                 </p>
               )}
             </div>

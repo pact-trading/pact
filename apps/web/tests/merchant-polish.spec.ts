@@ -29,8 +29,7 @@ test('invoice: customer preview, share link with QR, scheduled and immediate rem
   const reminder = page.getByRole('dialog', { name: 'Send reminder' });
   await expect(reminder.getByLabel('Message')).toHaveValue(/INV-1042/);
   await reminder.getByRole('radio', { name: /Schedule/ }).check();
-  const pastReminder = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
-  await reminder.getByLabel('Date (UTC)').fill(pastReminder);
+  await reminder.getByLabel('Date (UTC)').fill('2020-01-01');
   await reminder.getByRole('button', { name: 'Schedule reminder' }).click();
   await expect(reminder.getByText('Choose a time after now, or send it now.')).toBeVisible();
   // Tomorrow at 09:00 UTC, the dialog's default.
@@ -131,22 +130,21 @@ test('CSV export dialog: the period really filters the file', async ({ page }) =
   for (const line of body) expect(line.slice(1, 11) >= from).toBeTruthy();
 
   await dialog.getByRole('radio', { name: 'Custom range' }).check();
-  await dialog.getByLabel('From (UTC)').fill('2030-01-01');
-  await dialog.getByLabel('To (UTC)').fill('2030-01-31');
+  await dialog.getByLabel('From (UTC)').fill('2020-01-01');
+  await dialog.getByLabel('To (UTC)').fill('2020-01-31');
   await expect(rows).toHaveText('0');
-  await dialog.getByLabel('From (UTC)').fill('2030-02-10');
+  await dialog.getByLabel('From (UTC)').fill('2020-02-10');
   await expect(dialog.getByText('The start date must be on or before the end date.')).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Download CSV' })).toBeDisabled();
 });
 
-test('settings persist after a reload, and customer-pays fee mode adds a fee line', async ({ page }) => {
+test('settings persist after a reload, and a new invoice shows the fee taken from it', async ({ page }) => {
   await viewAs(page, 'merchant');
   await page.goto('/dashboard/settings');
   await page.getByLabel('Business name').fill('Kite Labs Studio');
   await expect(page.getByTestId('preview-brand')).toHaveText('Kite Labs Studio');
   await page.getByLabel('Brand colour', { exact: true }).fill('#2563eb');
   await page.getByLabel('Refund window, in days').fill('14');
-  await page.getByRole('radio', { name: /Customer pays the fee/ }).check();
   await page.getByRole('button', { name: 'Save settings' }).click();
   await expect(page.getByText('Settings saved')).toBeVisible();
 
@@ -154,7 +152,7 @@ test('settings persist after a reload, and customer-pays fee mode adds a fee lin
   await expect(page.getByLabel('Business name')).toHaveValue('Kite Labs Studio');
   await expect(page.getByLabel('Brand colour', { exact: true })).toHaveValue('#2563eb');
   await expect(page.getByLabel('Refund window, in days')).toHaveValue('14');
-  await expect(page.getByRole('radio', { name: /Customer pays the fee/ })).toBeChecked();
+  await expect(page.getByRole('radio', { name: /Customer pays the fee/ })).toHaveCount(0);
 
   await page.getByLabel('Business name').fill('');
   await page.getByRole('button', { name: 'Save settings' }).click();
@@ -164,32 +162,26 @@ test('settings persist after a reload, and customer-pays fee mode adds a fee lin
   await page.getByLabel('Payer email').fill('ap@client.example');
   await page.getByLabel('Item 1 description').fill('Design review');
   await page.getByLabel('Item 1 unit price').fill('500');
+  await expect(
+    page.getByText('The customer pays $500.00. Pact’s invoice fee, $2.50, comes out of the payment; you receive $497.50.'),
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Send invoice' }).click();
   await expect(page).toHaveURL(/\/dashboard\/invoices\/inv_/);
-  await expect(page.locator('main')).toContainText('Payment processing fee');
+  await expect(page.locator('main')).not.toContainText('Payment processing fee');
   await expect(page.locator('main')).toContainText('Kite Labs Studio');
 });
 
-test('gas deposit adds WBT to the tank, and the dialog validates the amount', async ({ page }) => {
+test('the fees ledger shows gross, fee and net for each payment', async ({ page }) => {
   await viewAs(page, 'merchant');
-  await page.goto('/dashboard/gas-tank');
-  await expect(page.getByText('Gas per payment')).toBeVisible();
-  const open = page.getByRole('button', { name: 'Deposit gas' });
-  const dialog = page.getByRole('dialog', { name: /Deposit gas/ });
-  const balanceNow = dialog.locator('dt', { hasText: 'Balance now' }).locator('xpath=following-sibling::dd');
-
-  await open.click();
-  const before = Number((await balanceNow.textContent())!.replace(' WBT', ''));
-  await dialog.getByLabel('Amount (WBT)').fill('20');
-  await dialog.getByRole('button', { name: /^Deposit/ }).click();
-  await expect(dialog.getByText('The demo accepts at most 10 WBT per deposit.')).toBeVisible();
-  await dialog.getByLabel('Amount (WBT)').fill('0.25');
-  await dialog.getByRole('button', { name: 'Deposit 0.2500 WBT' }).click();
-  await expect(page.getByText('0.2500 WBT deposited into your gas tank')).toBeVisible();
-  await expect(dialog).toBeHidden();
-
-  await open.click();
-  await expect(balanceNow).toHaveText(`${(before + 0.25).toFixed(4)} WBT`);
+  await page.goto('/dashboard/fees');
+  await expect(page.getByRole('heading', { name: 'Fees taken' })).toBeVisible();
+  const table = page.getByRole('table');
+  await expect(table.getByRole('columnheader', { name: 'Gross' })).toBeVisible();
+  await expect(table.getByRole('columnheader', { name: 'Fee' })).toBeVisible();
+  await expect(table.getByRole('columnheader', { name: 'Net' })).toBeVisible();
+  await expect(table.getByRole('cell', { name: /^Payment/ }).first()).toBeVisible();
+  await expect(page.getByText(/no fee and no gas|never pay a fee or gas/i).first()).toBeVisible();
+  await expect(page.getByText(/gas tank/i)).toHaveCount(0);
 });
 
 test('merchant simulates a failed renewal, then cancels with an effective date', async ({ page }) => {

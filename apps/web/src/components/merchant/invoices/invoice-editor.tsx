@@ -24,18 +24,22 @@ const safeMinor = (value: string) => {
 
 const EMAIL = /^\S+@\S+\.\S+$/;
 
+/** Pact's invoice rate: 0.5% of the payment, at least 0.15 USDT and at most 10 USDT, rounded up. */
+function invoiceFee(amount: bigint) {
+  const fee = (amount * 50n + 9_999n) / 10_000n;
+  return fee < 150_000n ? (amount < 150_000n ? amount : 150_000n) : fee > 10_000_000n ? 10_000_000n : fee;
+}
+
 export function InvoiceEditor({
   defaultDue,
   merchantName,
   logoUrl = null,
   brandColor = '#c6ff34',
-  feeMode = 'merchant',
 }: {
   defaultDue: string;
   merchantName: string;
   logoUrl?: string | null;
   brandColor?: string;
-  feeMode?: 'merchant' | 'customer';
 }) {
   const router = useRouter();
   const toast = useToast();
@@ -245,13 +249,13 @@ export function InvoiceEditor({
               </span>
             </label>
             <div className="flex items-baseline justify-between border-t border-border-subtle pt-4">
-              <span className="text-muted-foreground">{feeMode === 'customer' ? 'Subtotal' : 'Total'}</span>
+              <span className="text-muted-foreground">Total</span>
               <span className="text-2xl font-semibold">{usd(total)}</span>
             </div>
-            {feeMode === 'customer' && (
+            {total > 0n && (
               <p className="text-[13px] text-muted-foreground">
-                Your fee setting is “customer pays”, so a payment processing fee line is added when you save.
-                The invoice shows the exact amount.
+                The customer pays {usd(total)}. Pact’s invoice fee, {usd(invoiceFee(total))}, comes out of the
+                payment; you receive {usd(total - invoiceFee(total))}.
               </p>
             )}
             {error && <Notice tone="danger">{error}</Notice>}
@@ -272,7 +276,7 @@ export function InvoiceEditor({
             </div>
             <p className="text-[13px] text-muted-foreground">
               The payer can acknowledge it with one signature (“I owe this invoice”) and pay through the same
-              zero-fee checkout as your products.
+              checkout as your products, with no fee and no gas.
             </p>
           </CardBody>
         </Card>
@@ -318,11 +322,6 @@ export function InvoiceEditor({
           memo={memo.trim()}
           allowPartial={allowPartial}
         />
-        {feeMode === 'customer' && (
-          <p className="mt-3 text-[13px] text-muted-foreground">
-            A payment processing fee line is added to this total when you save.
-          </p>
-        )}
       </Dialog>
     </div>
   );

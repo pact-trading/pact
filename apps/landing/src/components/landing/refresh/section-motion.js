@@ -119,12 +119,12 @@ export function initSections(root, heroPreview, visibility) {
       width: 60,
     },
     {
-      product: 'GAS TANK',
-      title: 'The limits hold.',
-      copy: 'Spam, replays and dust are refused before they touch your tank.',
-      label: 'Drain protection',
-      value: '8 limits',
-      detail: 'Replay refused, 0 WBT spent',
+      product: 'FEES',
+      title: 'One fee, from the payment.',
+      copy: '0.8% of a checkout payment, at least 0.15 USDT. Pact pays the gas, and spam, replays and dust are refused.',
+      label: 'Fee on 100 USDT',
+      value: '0.80 USDT',
+      detail: 'You receive 99.20 USDT',
       width: 80,
     },
     {

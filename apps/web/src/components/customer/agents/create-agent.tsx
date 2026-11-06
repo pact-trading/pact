@@ -3,9 +3,8 @@
 import { IconCoins, IconRobot } from '@tabler/icons-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, useTransition } from 'react';
-import { parseEther, type Address } from 'viem';
+import type { Address } from 'viem';
 import { usePactAuth } from '@/components/auth/auth-context';
-import { useMerchantChain } from '@/components/merchant/live/merchant-chain';
 import { useSignedAction } from '@/components/auth/use-signed-action';
 import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -143,12 +142,11 @@ export function CreateAgent() {
 }
 
 /**
- * Puts USDT in the agent's own account. On a local fork: 1 test USDT. On the testnet: a small
- * WBT→USDT swap paid by the business wallet connected in this browser, sent straight to the account.
+ * Puts USDT in the agent's own account. On a local fork: 1 test USDT. On the testnet: send test USDT
+ * to the account; it pays in USDT and never needs WBT.
  */
 export function FundAgentButton({ id, account }: { id: string; account: Address }) {
   const auth = usePactAuth();
-  const chain = useMerchantChain();
   const router = useRouter();
   const toast = useToast();
   const [pending, start] = useTransition();
@@ -156,35 +154,10 @@ export function FundAgentButton({ id, account }: { id: string; account: Address 
   if (!auth.live) return null;
   if (!auth.live.config.localFork)
     return (
-      <div className="mb-4 grid gap-2">
-        {chain.available ? (
-          <Button
-            size="sm"
-            className="justify-self-start"
-            disabled={pending}
-            onClick={() =>
-              start(async () => {
-                setError('');
-                try {
-                  await chain.swapToUsdt(account, parseEther('0.02'));
-                  toast('USDT swapped into the agent account');
-                  router.refresh();
-                } catch (e) {
-                  setError(e instanceof Error ? e.message.split('\n')[0] : 'The swap failed.');
-                }
-              })
-            }
-          >
-            <IconCoins className="size-4" /> {pending ? 'Swapping…' : 'Swap 0.02 WBT into it'}
-          </Button>
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            To fund it, send test USDT to <span className="font-mono break-all">{account}</span>, or connect
-            your business wallet in this browser to swap WBT into it.
-          </p>
-        )}
-        {error && <Notice tone="danger">{error}</Notice>}
-      </div>
+      <p className="mb-4 text-sm text-muted-foreground">
+        To fund it, send test USDT to <span className="font-mono break-all">{account}</span>. It pays in USDT
+        and never needs WBT.
+      </p>
     );
   return (
     <div className="grid gap-2">

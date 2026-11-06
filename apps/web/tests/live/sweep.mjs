@@ -57,7 +57,7 @@ try {
     '/dashboard/plans/new',
     '/dashboard/subscriptions',
     '/dashboard/refunds',
-    '/dashboard/gas-tank',
+    '/dashboard/fees',
     '/dashboard/security',
     '/dashboard/paid-api',
     '/dashboard/agents',

@@ -20,7 +20,6 @@ import {
   subscribe,
   tick,
   USDT,
-  WEI,
   refusal,
 } from './engine';
 import {
@@ -78,7 +77,6 @@ function createStore(): MockStore {
         payoutMode: 'merchant_wallet',
         webhook: { url: 'https://api.kitelabs.example/webhooks/pact', configured: true },
       },
-      feeBps: 100,
       agentFeeMinor: USDT(0.0005),
       usdtMinor: USDT(8_420),
       webhookSecret: `whsec_${ids.token(12)}`, // synthetic, generated per seed
@@ -93,7 +91,7 @@ function createStore(): MockStore {
         'order.paid',
         'order.refunded',
       ],
-      onboarding: { account: true, brand: true, gas: true, integrate: true, test_payment: true },
+      onboarding: { account: true, brand: true, fees: true, integrate: true, test_payment: true },
     },
     otherMerchant: { name: 'Harbor Goods', address: '0x3c9d4e1f7a2b8c05d6e9f1a3b7c2d8e4f0a6b1c9' },
     products: [],
@@ -103,22 +101,9 @@ function createStore(): MockStore {
     plans: [],
     subscriptions: [],
     refusals: [],
-    gas: {
-      balanceWei: WEI(0.62),
-      dailyCapWei: WEI(0.05),
-      policy: {
-        mode: 'absorb',
-        surchargeMinor: USDT(0.01).toString(),
-        perPayerDailyActions: 20,
-        minimumAmountMinor: USDT(1).toString(),
-        maxGasPerCall: 1_200_000,
-        maxFeePerGasWei: '2000000000',
-        lowRunwayAlertDays: 7,
-      },
-      ledger: [],
-      faucetClaimedAt: null,
-      wbtUsdMinor: USDT(30),
-    },
+    // The story's merchant signed the fee terms and both refund permits when it started.
+    fees: { acceptedVersion: 1, permits: { escrow: true, router: true }, usdtPerWbtMinor: USDT(30) },
+    relayed: [],
     agents: [],
     agentCalls: [],
     endpoints: [
@@ -378,7 +363,6 @@ function createStore(): MockStore {
       payerAddress: null,
       txHash: null,
       feeMinor: 0n,
-      gasWei: 0n,
       paidAt: null,
       refunds: [],
       activity: [{ type: 'order.created', at: iso(now(s)), detail: 'Checkout started', txHash: null }],
@@ -715,7 +699,7 @@ function createStore(): MockStore {
     [11, 'dust'],
     [9, 'wrong_selector'],
     [7, 'payer_daily_cap'],
-    [5, 'fee_too_low'],
+    [5, 'amount_below_fee'],
     [3, 'deadline'],
     [1, 'replay'],
   ];
@@ -724,11 +708,10 @@ function createStore(): MockStore {
       refusal(s, { source: 'sponsorship', reason, objectId: ids.tx(), actor: ids.address() }),
     );
   }
-  // Faucet top-up a week ago.
-  on(realNow - 7 * DAY, () => {
-    s.gas.balanceWei += WEI(0.5) / 5n;
-    s.gas.faucetClaimedAt = now(s);
-  });
+  // An account nobody knows signs a refund that would spend the merchant's USDT.
+  on(realNow - 4 * DAY + 6 * HOUR, () =>
+    refusal(s, { source: 'sponsorship', reason: 'signer_not_merchant', objectId: ids.tx(), actor: ids.address() }),
+  );
 
   // Story beats may schedule follow-ups while running, so always take the earliest pending event.
   const done = new Set<Event>();
@@ -743,12 +726,6 @@ function createStore(): MockStore {
 
   setNow(s, realNow);
   tick(s);
-  // Size the tank to about 23 days at the last week's average sponsored spend.
-  const weekAgo = realNow - 7 * DAY;
-  const weekSpend = s.gas.ledger
-    .filter(entry => new Date(entry.createdAt).getTime() >= weekAgo)
-    .reduce((sum, entry) => sum + BigInt(entry.gasWei), 0n);
-  s.gas.balanceWei = (weekSpend / 7n) * 23n;
   // One delivery that needed a retry, for the webhook log.
   const retried = s.webhookDeliveries.find(d => d.status === 'delivered');
   if (retried)

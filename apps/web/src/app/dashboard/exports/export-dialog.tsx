@@ -98,7 +98,7 @@ export function ExportDialog({ today, from, to }: { today: string; from: string;
         open={open}
         onClose={() => setOpen(false)}
         title="Export CSV"
-        description="A ledger of payments, refunds, fees and gas, ready for QuickBooks or Xero."
+        description="A ledger of payments, refunds and fees, gross and net, ready for QuickBooks or Xero."
         className="sm:max-w-xl"
         footer={
           <>

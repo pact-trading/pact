@@ -45,62 +45,55 @@ export async function open(shots) {
   const toastWait = text => page.getByText(text).first().waitFor({ timeout: 90000 });
   return { browser, context, page, errors, shot, step, cookie, call, toastWait };
 }
-/** Merchant wallet with a funded tank, cap, approvals and fee USDT. */
+/**
+ * Merchant wallet with Pact's fee terms and both refund permits signed, and a little USDT for refunds.
+ * Every step is a signature Pact's relayer submits: the wallet never holds WBT.
+ */
 export async function readyMerchant(t) {
-  const { page, step, toastWait } = t;
+  const { page, step } = t;
   if (tn) return readyTestnetMerchant(t);
   await step('merchant: connect local wallet', async () => {
     await page.goto(`${base}/login`);
     await page.getByRole('button', { name: 'Use a local test wallet' }).click();
     await page.waitForURL(`${base}/dashboard`, { timeout: 30000 });
   });
-  await step('merchant: setup', async () => {
-    await page.goto(`${base}/dashboard/onboarding`);
-    await page.getByText('Set up live payments').waitFor();
-    for (const [button, toast] of [
-      ['Get 0.5 test WBT', 'Test WBT added to your wallet'],
-      ['Deposit 0.2 WBT', '0.2 WBT deposited'],
-      ['Set 0.1 WBT a day', 'Daily cap set'],
-      ['Approve', 'Fees and refunds allowed'],
-      ['Get 5 test USDT', 'Test USDT added to your wallet'],
-    ]) {
-      await page.getByRole('button', { name: button }).click();
-      await toastWait(toast);
+  await signFees(t);
+  await step('merchant: hold 5 USDT for refunds', async () => {
+    const { merchant } = await t.call('merchant', '/v1/config');
+    await t.call('merchant', '/v1/dev/faucet', { address: merchant, usdt: '5' });
+  });
+}
+/** Signs the fee terms and the refund permits on the Fees page; steps already done show no button. */
+async function signFees(t) {
+  const { page, step, toastWait } = t;
+  await step('merchant: sign fee terms and refund permits', async () => {
+    await page.goto(`${base}/dashboard/fees`);
+    await page.getByRole('heading', { name: 'Your fee terms' }).waitFor();
+    const terms = page.getByRole('button', { name: 'Sign fee terms' });
+    if (await terms.count()) {
+      await terms.first().click();
+      await toastWait('Fee terms signed');
     }
+    const permits = page.getByRole('button', { name: /^Sign the (two )?refund permits?$/ });
+    if (await permits.count()) {
+      await permits.first().click();
+      await toastWait('Refund permits signed');
+    }
+    await page.getByRole('heading', { name: 'Ready' }).waitFor({ timeout: 90000 });
   });
 }
 /** Testnet: one reused merchant wallet (injected), set up once; steps already done show no button. */
 async function readyTestnetMerchant(t) {
-  const { page, step, toastWait } = t;
+  const { page, step } = t;
   await step(`merchant: connect wallet ${tn.merchant.address}`, async () => {
-    await tn.topUpMerchant('0.05');
     await page.goto(`${base}/login`);
     const again = page.getByRole('button', { name: /^Open my business workspace/ });
     if (await again.count()) await again.first().click();
     else await page.getByRole('button', { name: 'Connect wallet' }).click();
     await page.waitForURL(`${base}/dashboard`, { timeout: 60000 });
   });
-  await step('merchant: setup (only the steps not done yet)', async () => {
-    await page.goto(`${base}/dashboard/onboarding`);
-    await page.getByText('Set up live payments').waitFor();
-    await page.waitForTimeout(4000);
-    if (await page.getByRole('button', { name: 'Deposit 0.2 WBT' }).count()) {
-      await tn.topUpMerchant('0.26');
-      await page.getByRole('button', { name: 'Refresh' }).click();
-      await page.waitForTimeout(3000);
-    }
-    for (const [button, toast] of [
-      ['Deposit 0.2 WBT', '0.2 WBT deposited'],
-      ['Set 0.1 WBT a day', 'Daily cap set'],
-      ['Approve', 'Fees and refunds allowed'],
-      ['Swap 0.01 WBT', 'Swapped WBT for USDT'],
-    ]) {
-      const b = page.getByRole('button', { name: button, exact: true });
-      if (!(await b.count())) continue;
-      await b.first().click();
-      await toastWait(toast);
-    }
-  });
+  await signFees(t);
+  await step('merchant: hold 5 USDT for refunds', () => tn.topUpUsdt(tn.merchant.address, '5'));
 }
 /**
  * A customer holding at least `usdt`: the fork's faucet, or on the testnet a swap paid by the deployer.

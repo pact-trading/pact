@@ -11,12 +11,12 @@ import {
   IconFileInvoice,
   IconFilePlus,
   IconFingerprint,
-  IconGasStation,
   IconLink,
   IconMail,
   IconPlayerPause,
   IconPlayerPlay,
   IconReceiptRefund,
+  IconReceiptTax,
   IconShieldCheck,
   IconWallet,
 } from '@tabler/icons-react';
@@ -47,7 +47,7 @@ export function AppUi({ className, children }: { className?: string; children: R
 }
 
 function AppBar({ active }: { active: string }) {
-  const tabs = ['Overview', 'Orders', 'Subscriptions', 'Gas tank'];
+  const tabs = ['Overview', 'Orders', 'Subscriptions', 'Fees'];
   return (
     <div className="flex items-center gap-5 border-b border-border px-5 py-3">
       <span className="text-foreground">
@@ -144,13 +144,12 @@ export function OverviewWindow() {
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="Gas tank" description="You pay the gas" />
-            <CardBody className="flex items-center gap-4">
-              <Gauge value={20} max={30} label="20" sublabel="days left" size={112} />
-              <div className="text-sm text-muted-foreground">
-                <div className="font-medium text-foreground">0.0286 WBT</div>
-                Daily cap 0.01 WBT
-              </div>
+            <CardHeader title="Fees" description="Taken from each payment" />
+            <CardBody className="grid gap-1 text-sm text-muted-foreground">
+              <div className="text-2xl font-semibold text-foreground">0.80%</div>
+              Per checkout payment, at least 0.15 USDT
+              <div className="mt-2 font-medium text-foreground">No gas to buy</div>
+              Pact pays it
             </CardBody>
           </Card>
         </div>
@@ -208,7 +207,7 @@ export function SignedCapCard() {
               items={[
                 { label: 'Signed cap', value: '15 USDT' },
                 { label: 'Price', value: '12 USDT' },
-                { label: 'Gas', value: 'Paid by merchant' },
+                { label: 'Gas', value: 'Paid by Pact' },
               ]}
             />
           </div>
@@ -331,20 +330,18 @@ export function AgentsScene() {
   );
 }
 
-export function GasScene() {
+export function FeesScene() {
   return (
     <>
       <AppUi className="pact-scene-main">
         <Card>
-          <CardHeader title="Gas tank" description="Sponsored gas for your customers" action={<IconGasStation className="size-5 text-muted-foreground" />} />
-          <CardBody className="flex items-center gap-5">
-            <Gauge value={20} max={30} label="20" sublabel="days left" size={116} />
+          <CardHeader title="Fees" description="Taken from each payment, at the rates you signed" action={<IconReceiptTax className="size-5 text-muted-foreground" />} />
+          <CardBody>
             <DetailList
-              className="flex-1"
               items={[
-                { label: 'Balance', value: '0.0286 WBT' },
-                { label: 'Daily cap', value: '0.01 WBT' },
-                { label: 'Spent today', value: '0.0004 WBT', hint: '224 payments' },
+                { label: 'Gross, 30 days', value: '2,675.00 USDT', hint: '224 payments' },
+                { label: 'Pact fees', value: '21.40 USDT' },
+                { label: 'Net to you', value: '2,653.60 USDT' },
               ]}
             />
           </CardBody>
@@ -352,7 +349,7 @@ export function GasScene() {
       </AppUi>
       <AppUi className="pact-scene-float">
         <Notice tone="shield" title="Replay refused" className="bg-card shadow-pop">
-          Same signature sent twice. Tank spent: 0 WBT.
+          Same signature sent twice. Nothing was sent, and nothing was spent.
         </Notice>
       </AppUi>
     </>
@@ -451,8 +448,8 @@ function LimitsStep() {
           items={[
             { title: 'Replay refused', detail: 'Same signature sent twice', tone: 'danger', at: '12:04' },
             { title: 'Dust payment refused', detail: 'Under the 0.50 USDT minimum', tone: 'danger', at: '11:52' },
-            { title: 'Daily cap reached for spam-bot', detail: 'Further calls refused until tomorrow', tone: 'warning', at: '11:40' },
-            { title: 'Tank spent on attacks', detail: '0 WBT', tone: 'success', at: 'Today' },
+            { title: 'Refund signed by a stranger refused', detail: 'Only you can spend your USDT', tone: 'warning', at: '11:40' },
+            { title: 'Your USDT spent on attacks', detail: '0 USDT', tone: 'success', at: 'Today' },
           ]}
         />
       </CardBody>

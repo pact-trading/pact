@@ -235,9 +235,11 @@ function applyScenario(s: MockStore, id: ScenarioId): string | null {
       c.testFundsClaimedAt = null;
       return `${c.name}’s balance is now $0.00.`;
     }
-    case 'gas-empty':
-      s.gas.balanceWei = 0n;
-      return `${s.merchant.name}’s gas tank is empty.`;
+    case 'terms-unsigned':
+      // As a merchant that never signed: no terms, no refund permits.
+      s.fees.acceptedVersion = 0;
+      s.fees.permits = { escrow: false, router: false };
+      return `${s.merchant.name} has not signed Pact’s fee terms yet.`;
     case 'expired': {
       const count = expireOpenCheckouts(s);
       return count
@@ -515,7 +517,6 @@ export function createMockLab(kit: MockKit): LabData {
         payerAddress: null,
         txHash: null,
         feeMinor: 0n,
-        gasWei: 0n,
         paidAt: null,
         refunds: [],
         activity: [

@@ -18,17 +18,12 @@ import type { ApiKit } from './source';
 
 /**
  * Invoice financing on the receivables contract and the investor registry. The API prepares each
- * action and checks the contract's rules first (recording refusals for compliance). The merchant's
- * wallet sends its own transactions (listing, cancelling, buying back). Investors and compliance
- * officers only sign: Pact's relayer submits their orders and pays the gas. Customer payments on a
- * financed invoice go through the Router as usual and reach the holders.
+ * action and checks the contract's rules first (recording refusals for compliance). Merchants,
+ * investors and compliance officers only sign: Pact's relayer submits their orders and pays the gas
+ * (a buy-back pays its own network fee in USDT). Customer payments on a financed invoice go through
+ * the Router as usual and reach the holders.
  */
-type Prepared = {
-  title: string;
-  lines: Array<{ label: string; value: string }>;
-  transactions: Array<{ to: string; data: string; label: string }>;
-};
-/** EIP-712 messages to sign (the order, then any USDT permit) and the order to send back. */
+/** EIP-712 messages to sign (any USDT permits, then the order) and the order to send back. */
 type PreparedSignature = {
   title: string;
   lines: Array<{ label: string; value: string }>;
@@ -41,8 +36,7 @@ const messages: Record<string, string> = {
   invalid_identity_token: 'Your session ended. Sign in again.',
   financing_unavailable: 'Invoice financing is not deployed on this network.',
   transaction_reverted: 'The transaction was reverted on chain.',
-  transaction_not_found: 'The transaction has not confirmed yet. Refresh in a moment.',
-  transaction_sender_mismatch: 'That transaction was sent from another wallet.',
+  relay_limit: 'Pact relays a limited number of signed orders an hour for each wallet. Try again later.',
 };
 
 export function createApiFinancing({ mApi, hold, take }: ApiKit): FinancingData {
@@ -71,20 +65,6 @@ export function createApiFinancing({ mApi, hold, take }: ApiKit): FinancingData 
   const post = <T>(role: SessionRole, path: string, body: unknown = {}) =>
     call<T>(role, path, { method: 'POST', body: JSON.stringify(body) });
   const id = encodeURIComponent;
-  /** Holds a prepared action; the browser wallet sends its transactions and the submit gets their hashes. */
-  const prepare = (
-    kind: string,
-    context: Record<string, unknown>,
-    signer: SignRequest['signer'],
-    prepared: Prepared,
-  ) =>
-    hold(kind, context, {
-      title: prepared.title,
-      lines: prepared.lines,
-      typedData: {},
-      signer,
-      transactions: prepared.transactions,
-    });
   /** Holds a signed-order action: the wallet signs every message in one confirmation, Pact relays. */
   const sign = (
     kind: string,
@@ -129,63 +109,59 @@ export function createApiFinancing({ mApi, hold, take }: ApiKit): FinancingData 
     };
     return post<T>(role, path(held), { order: held.order, signatures: signatures(signature, held.count) });
   };
-  const hashes = (signature: string) => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(signature);
-    } catch {
-      parsed = null;
-    }
-    if (!Array.isArray(parsed) || !parsed.every(h => typeof h === 'string' && /^0x[0-9a-fA-F]{64}$/.test(h)))
-      throw new DataError('invalid_transactions', 'The wallet did not return its transaction hashes.', 400);
-    return parsed as string[];
-  };
 
   return {
     overview: () => call<MerchantFinancingOverview>('merchant', '/v1/financing'),
     invoice: invoiceId => call<FinancedInvoice>('merchant', `/v1/financing/invoices/${id(invoiceId)}`),
+    // The merchant signs each order; Pact's relayer submits it, so the merchant needs no WBT.
     async prepareRequest(invoiceId) {
-      return prepare(
+      return sign(
         'financing-list',
         { invoiceId },
         'merchant',
-        await post<Prepared>('merchant', `/v1/financing/invoices/${id(invoiceId)}/list`),
+        await post<PreparedSignature>('merchant', `/v1/financing/invoices/${id(invoiceId)}/list`),
       );
     },
-    async submitRequest(token, signature) {
-      const { invoiceId } = (await take('financing-list', token)) as { invoiceId: string };
-      return post<FinancedInvoice>('merchant', `/v1/financing/invoices/${id(invoiceId)}/transactions`, {
-        hashes: hashes(signature),
-      });
-    },
+    submitRequest: (token, signature) =>
+      relay<FinancedInvoice>(
+        'merchant',
+        'financing-list',
+        token,
+        signature,
+        held => `/v1/financing/invoices/${id(held.invoiceId)}/list/relay`,
+      ),
     async prepareCancel(invoiceId) {
-      return prepare(
+      return sign(
         'financing-cancel',
         { invoiceId },
         'merchant',
-        await post<Prepared>('merchant', `/v1/financing/invoices/${id(invoiceId)}/cancel`),
+        await post<PreparedSignature>('merchant', `/v1/financing/invoices/${id(invoiceId)}/cancel`),
       );
     },
-    async submitCancel(token, signature) {
-      const { invoiceId } = (await take('financing-cancel', token)) as { invoiceId: string };
-      return post<FinancedInvoice>('merchant', `/v1/financing/invoices/${id(invoiceId)}/transactions`, {
-        hashes: hashes(signature),
-      });
-    },
+    submitCancel: (token, signature) =>
+      relay<FinancedInvoice>(
+        'merchant',
+        'financing-cancel',
+        token,
+        signature,
+        held => `/v1/financing/invoices/${id(held.invoiceId)}/cancel/relay`,
+      ),
     async prepareBuyBack(invoiceId) {
-      return prepare(
+      return sign(
         'financing-buy-back',
         { invoiceId },
         'merchant',
-        await post<Prepared>('merchant', `/v1/financing/invoices/${id(invoiceId)}/buy-back`),
+        await post<PreparedSignature>('merchant', `/v1/financing/invoices/${id(invoiceId)}/buy-back`),
       );
     },
-    async submitBuyBack(token, signature) {
-      const { invoiceId } = (await take('financing-buy-back', token)) as { invoiceId: string };
-      return post<FinancedInvoice>('merchant', `/v1/financing/invoices/${id(invoiceId)}/transactions`, {
-        hashes: hashes(signature),
-      });
-    },
+    submitBuyBack: (token, signature) =>
+      relay<FinancedInvoice>(
+        'merchant',
+        'financing-buy-back',
+        token,
+        signature,
+        held => `/v1/financing/invoices/${id(held.invoiceId)}/buy-back/relay`,
+      ),
 
     marketplace: () =>
       call<{

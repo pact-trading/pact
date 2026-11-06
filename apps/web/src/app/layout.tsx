@@ -23,7 +23,7 @@ export const metadata: Metadata = {
   },
   title: { default: 'Pact: get paid in USDT on Whitechain', template: '%s · Pact' },
   description:
-    'Checkout, subscriptions, invoices, refunds and agent payments in USDT, with gas paid by the business and zero crypto steps for customers.',
+    'Checkout, subscriptions, invoices, refunds and agent payments in USDT, with one fee taken from each payment, no gas for anyone and zero crypto steps for customers.',
 };
 
 export const viewport: Viewport = {

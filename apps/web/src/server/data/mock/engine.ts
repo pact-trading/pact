@@ -1,6 +1,6 @@
 import 'server-only';
 import type { Address, Hex } from 'viem';
-import type { RefusalEvent, RefusalSource, SponsoredAction } from '@pactagent/core/platform-types';
+import type { RefusalEvent, RefusalSource } from '@pactagent/core/platform-types';
 import { toMinor } from '@/lib/format';
 import { reasonDetail } from '@/lib/reasons';
 import { DataError } from '../errors';
@@ -16,6 +16,7 @@ import {
   type MockStore,
   type OrderRecord,
   type PlanRecord,
+  type RelayedAction,
   type SubscriptionRecord,
 } from './store';
 
@@ -29,8 +30,8 @@ export function dec6(minor: bigint): string {
 export const USDT = (dollars: number) => BigInt(Math.round(dollars * 1_000_000));
 export const WEI = (wbt: number) => BigInt(Math.round(wbt * 1e9)) * 1_000_000_000n;
 
-/** Approximate gas per sponsored action, in wei. */
-const GAS: Record<SponsoredAction, bigint> = {
+/** Approximate gas per relayed action, in wei. Pact pays it; only a refund's is charged, in USDT. */
+const GAS: Record<RelayedAction, bigint> = {
   payment: WEI(0.00031),
   refund: WEI(0.00026),
   subscribe: WEI(0.00034),
@@ -39,7 +40,24 @@ const GAS: Record<SponsoredAction, bigint> = {
   invoice_acknowledge: WEI(0.00012),
   account_setup: WEI(0.00052),
   agent_settlement: WEI(0.00012),
+  fee_terms: WEI(0.00009),
+  permit: WEI(0.00007),
 };
+
+/**
+ * Pact's published fee terms (FeeSchedule version 1): checkout covers payments, captures and
+ * renewals; invoice covers invoices the merchant sent. A zero cap means no cap.
+ */
+export const FEE_TERMS = {
+  version: 1,
+  checkout: { bps: 80, minFeeMinor: 150_000n, maxFeeMinor: 0n },
+  invoice: { bps: 50, minFeeMinor: 150_000n, maxFeeMinor: 10_000_000n },
+} as const;
+export type FeeProduct = 'checkout' | 'invoice';
+/** The smallest payment the Router accepts. */
+export const MIN_AMOUNT_MINOR = 1_000_000n;
+/** Actions one payer can have relayed per day. */
+const PAYER_DAILY_ACTIONS = 20;
 
 export const SECURITY_LAYERS = [
   {
@@ -47,28 +65,28 @@ export const SECURITY_LAYERS = [
     name: 'Function allowlist',
     enforcedIn: 'contract',
     stops: 'Using the relayer to run arbitrary transactions',
-    reasons: ['wrong_selector', 'target_refused'],
+    reasons: ['wrong_selector', 'data_hash', 'target_refused', 'invalid_address'],
   },
   {
     id: 2,
-    name: 'Per-merchant gas tank',
+    name: 'Fee terms the merchant signed',
     enforcedIn: 'contract',
-    stops: "One merchant's gas paying for another merchant's traffic",
-    reasons: ['tank_limit'],
+    stops: "Anyone choosing a merchant's fee or spending its money on a call it did not sign",
+    reasons: ['fee_terms_required', 'quote_mismatch', 'merchant_mismatch', 'signer_not_merchant'],
   },
   {
     id: 3,
-    name: 'Daily caps per payer and merchant',
+    name: 'Daily caps per payer',
     enforcedIn: 'contract',
-    stops: 'Spam from one payer or one merchant',
-    reasons: ['payer_daily_cap', 'merchant_daily_sponsorship_cap'],
+    stops: 'Spam from one payer',
+    reasons: ['payer_daily_cap'],
   },
   {
     id: 4,
     name: 'Minimum amount, fee covers gas',
     enforcedIn: 'contract',
-    stops: "Dust payments at the merchant's expense",
-    reasons: ['dust', 'fee_too_low'],
+    stops: 'Dust payments and payments whose fee would not cover their gas',
+    reasons: ['dust', 'amount_below_fee', 'fee_below_gas', 'fee_unavailable', 'gas_fee_unavailable'],
   },
   {
     id: 5,
@@ -82,7 +100,7 @@ export const SECURITY_LAYERS = [
     name: 'Simulate before broadcast',
     enforcedIn: 'relayer',
     stops: 'Paying gas for transactions that would fail',
-    reasons: ['simulation_refused'],
+    reasons: ['simulation_refused', 'target_failed'],
   },
   {
     id: 7,
@@ -93,10 +111,10 @@ export const SECURITY_LAYERS = [
   },
   {
     id: 8,
-    name: 'Hot wallet float and circuit breaker',
+    name: 'Hot wallet float, circuit breaker and sponsorship budget',
     enforcedIn: 'relayer',
-    stops: 'A bug or leaked key emptying the float',
-    reasons: ['circuit_open', 'circuit_budget'],
+    stops: 'A bug, a leaked key or free calls emptying the float',
+    reasons: ['circuit_open', 'circuit_budget', 'merchant_circuit_budget', 'sponsorship_budget'],
   },
 ] as const;
 
@@ -167,30 +185,26 @@ export function refusal(
   return event;
 }
 
-function spentTodayWei(s: MockStore) {
-  const today = dayKey(now(s));
-  return s.gas.ledger
-    .filter(entry => entry.createdAt.startsWith(today))
-    .reduce((sum, entry) => sum + BigInt(entry.gasWei), 0n);
-}
-
 function payerActionsToday(s: MockStore, payer: string) {
   const today = dayKey(now(s));
-  return s.gas.ledger.filter(
-    entry => entry.createdAt.startsWith(today) && entry.objectId.startsWith(`${payer}:`),
-  ).length;
+  return s.relayed.filter(entry => entry.createdAt.startsWith(today) && entry.payer === payer).length;
 }
 
-export const gasUsd = (s: MockStore, gasWei: bigint) => (gasWei * s.gas.wbtUsdMinor) / 10n ** 18n;
+/** `gasWei` of gas in USDT base units at the FeeSchedule's WBT price, rounded up. */
+export const gasFeeMinor = (s: MockStore, gasWei: bigint) =>
+  (gasWei * s.fees.usdtPerWbtMinor + 10n ** 18n - 1n) / 10n ** 18n;
+
+/** Actions that take Pact's fee: refused until the merchant has signed the fee terms. */
+const FEE_ACTIONS: RelayedAction[] = ['payment', 'renewal', 'subscribe'];
 
 /**
- * The relayer submits a signed request and the merchant's tank pays the gas.
- * Applies the contract limits; a refusal spends nothing.
+ * Pact's relayer submits a signed request and pays the gas. Applies the contract limits; a
+ * refusal spends nothing. Nobody but Pact holds WBT.
  */
 export function sponsor(
   s: MockStore,
   input: {
-    action: SponsoredAction;
+    action: RelayedAction;
     objectId: string;
     label: string;
     payer: string;
@@ -204,40 +218,40 @@ export function sponsor(
     ok: false as const,
     refusal: refusal(s, { source: 'sponsorship', reason, objectId: input.objectId, actor: input.payer }),
   });
-  if (input.amountMinor !== undefined && input.amountMinor < BigInt(s.gas.policy.minimumAmountMinor))
-    return refuse('dust');
-  if (input.feeMinor !== undefined && input.action === 'payment' && input.feeMinor < gasUsd(s, gasWei))
-    return refuse('fee_too_low');
+  if (FEE_ACTIONS.includes(input.action) && s.fees.acceptedVersion === 0) return refuse('fee_terms_required');
+  if (input.amountMinor !== undefined && input.amountMinor < MIN_AMOUNT_MINOR) return refuse('dust');
+  if (input.feeMinor !== undefined && input.feeMinor < gasFeeMinor(s, gasWei)) return refuse('fee_below_gas');
   // Agent settlements are limited by the agent's own session caps instead of the payer count.
-  if (
-    input.action !== 'agent_settlement' &&
-    payerActionsToday(s, input.payer) >= s.gas.policy.perPayerDailyActions
-  )
+  if (input.action !== 'agent_settlement' && payerActionsToday(s, input.payer) >= PAYER_DAILY_ACTIONS)
     return refuse('payer_daily_cap');
-  if (spentTodayWei(s) + gasWei > s.gas.dailyCapWei) return refuse('merchant_daily_sponsorship_cap');
-  if (s.gas.balanceWei < gasWei) return refuse('tank_limit');
   const txHash = s.ids.tx();
-  s.gas.balanceWei -= gasWei;
-  s.gas.ledger.unshift({
-    id: s.ids.next('gas', 9000),
+  s.relayed.unshift({
+    id: s.ids.next('rly', 9000),
     createdAt: iso(now(s)),
     action: input.action,
-    objectId: `${input.payer}:${input.objectId}`,
+    payer: input.payer,
+    objectId: input.objectId,
     label: input.label,
     gasWei: gasWei.toString(),
-    gasUsdMinor: gasUsd(s, gasWei).toString(),
-    feeMinor: (input.feeMinor ?? 0n).toString(),
     txHash,
   });
+  // Only today's entries count against a payer; older ones are kept for the explorer, within a bound.
+  if (s.relayed.length > 600) s.relayed.length = 600;
   return { ok: true, txHash, gasWei };
 }
 
-export function feeFor(s: MockStore, amount: bigint) {
-  const fee = (amount * BigInt(s.merchant.feeBps)) / 10_000n;
-  return fee < USDT(0.05) ? USDT(0.05) : fee;
+/** The FeeSchedule's `feeFor`: rounded up, clamped to the minimum and cap, never above the amount. */
+export function feeFor(amount: bigint, product: FeeProduct = 'checkout') {
+  const rate = FEE_TERMS[product];
+  let fee = (amount * BigInt(rate.bps) + 9_999n) / 10_000n;
+  if (fee < rate.minFeeMinor) fee = rate.minFeeMinor;
+  if (rate.maxFeeMinor !== 0n && fee > rate.maxFeeMinor) fee = rate.maxFeeMinor;
+  if (fee > amount)
+    throw new DataError('amount_below_fee', `The amount is below the ${dec6(rate.minFeeMinor)} USDT minimum fee.`);
+  return fee;
 }
 
-/** The customer's smart account is deployed by the relayer on first use, at the merchant's cost. */
+/** The customer's smart account is deployed by Pact's relayer on first use, at no cost to anyone. */
 export function ensureAccount(s: MockStore, c: CustomerRecord) {
   if (s.deployedAccounts.has(c.id)) return;
   const deployed = sponsor(s, {
@@ -261,13 +275,14 @@ export function collect(
     label: string;
     type: 'Payment' | 'Subscription' | 'Invoice';
     orderId: string | null;
-    action: SponsoredAction;
+    action: RelayedAction;
   },
-): { txHash: Hex; feeMinor: bigint; gasWei: bigint } {
+): { txHash: Hex; feeMinor: bigint } {
   if (c.balanceMinor < input.amount)
     throw new DataError('insufficient_funds', 'Not enough funds in the account.');
   ensureAccount(s, c);
-  const feeMinor = feeFor(s, input.amount);
+  // Pact's fee comes out of the payment: the merchant receives the rest.
+  const feeMinor = input.amount < MIN_AMOUNT_MINOR ? 0n : feeFor(input.amount, input.type === 'Invoice' ? 'invoice' : 'checkout');
   const sponsored = sponsor(s, {
     action: input.action,
     objectId: input.objectId,
@@ -288,11 +303,10 @@ export function collect(
     customer: c.email,
     grossMinor: input.amount,
     feeMinor,
-    gasWei: sponsored.gasWei,
     refundOf: null,
     txHash: sponsored.txHash,
   });
-  return { txHash: sponsored.txHash, feeMinor, gasWei: sponsored.gasWei };
+  return { txHash: sponsored.txHash, feeMinor };
 }
 
 export function payOrder(s: MockStore, record: OrderRecord, c: CustomerRecord) {
@@ -311,7 +325,6 @@ export function payOrder(s: MockStore, record: OrderRecord, c: CustomerRecord) {
   record.order.paymentId = paymentId;
   record.txHash = paid.txHash;
   record.feeMinor = paid.feeMinor;
-  record.gasWei = paid.gasWei;
   record.paidAt = now(s);
   record.payerAddress = c.address;
   record.activity.push({
@@ -362,6 +375,19 @@ export function refundOrder(s: MockStore, record: OrderRecord, amount: bigint, r
       `${event.detail} At most ${dec6(refundableMinor(record))} USDT can be refunded.`,
     );
   }
+  // The merchant signs the refund; the escrow sends it from the merchant's wallet, and the Router
+  // takes its network fee in USDT. Both need the standing permits the merchant signed once.
+  if (s.fees.acceptedVersion === 0 || !s.fees.permits.escrow || !s.fees.permits.router)
+    throw new DataError(
+      'permits_required',
+      'Sign the fee terms and the two refund permits on the Fees page before sending a refund.',
+      409,
+    );
+  const ceiling = gasFeeMinor(s, (GAS.refund * 115n) / 100n);
+  if (s.merchant.usdtMinor < amount + ceiling) {
+    const event = refusal(s, { source: 'refund', reason: 'gas_fee_unavailable', objectId, actor: s.merchant.name });
+    throw new DataError(event.reason, event.detail);
+  }
   const sponsored = sponsor(s, {
     action: 'refund',
     objectId: `${record.order.id}:refund`,
@@ -369,6 +395,7 @@ export function refundOrder(s: MockStore, record: OrderRecord, amount: bigint, r
     payer: s.merchant.address,
   });
   if (!sponsored.ok) throw new DataError(sponsored.refusal.reason, sponsored.refusal.detail);
+  const networkFee = gasFeeMinor(s, sponsored.gasWei);
   const at = iso(now(s));
   record.refunds.push({
     id: s.ids.next('ref', 3000),
@@ -387,20 +414,34 @@ export function refundOrder(s: MockStore, record: OrderRecord, amount: bigint, r
     txHash: sponsored.txHash,
   });
   c.balanceMinor += amount;
-  s.merchant.usdtMinor -= amount;
-  s.accounting.push({
-    id: s.ids.next('acc', 20000),
-    at: now(s),
-    type: 'Refund',
-    objectId: record.refunds.at(-1)!.id,
-    orderId: record.order.id,
-    customer: c.email,
-    grossMinor: -amount,
-    feeMinor: 0n,
-    gasWei: sponsored.gasWei,
-    refundOf: objectId,
-    txHash: sponsored.txHash,
-  });
+  s.merchant.usdtMinor -= amount + networkFee;
+  s.accounting.push(
+    {
+      id: s.ids.next('acc', 20000),
+      at: now(s),
+      type: 'Refund',
+      objectId: record.refunds.at(-1)!.id,
+      orderId: record.order.id,
+      customer: c.email,
+      grossMinor: -amount,
+      feeMinor: 0n,
+      refundOf: objectId,
+      txHash: sponsored.txHash,
+    },
+    {
+      // The refund's network fee, paid in USDT through the Router.
+      id: s.ids.next('acc', 20000),
+      at: now(s),
+      type: 'Fee',
+      objectId: record.refunds.at(-1)!.id,
+      orderId: record.order.id,
+      customer: c.email,
+      grossMinor: 0n,
+      feeMinor: networkFee,
+      refundOf: objectId,
+      txHash: sponsored.txHash,
+    },
+  );
   webhook(s, 'payment.refunded', objectId);
   webhook(s, 'order.refunded', record.order.id);
 }
@@ -573,7 +614,6 @@ export function agentCall(
           customer: session.name,
           grossMinor: amount,
           feeMinor: s.merchant.agentFeeMinor,
-          gasWei: sponsored.gasWei,
           refundOf: null,
           txHash,
         });
@@ -620,7 +660,7 @@ export function payInvoice(s: MockStore, record: InvoiceRecord, c: CustomerRecor
   if (!record.invoice.allowPartial && amount !== remaining)
     throw new DataError('partial_not_allowed', 'This invoice must be paid in full.');
   // A financed invoice is paid to whoever holds the claim (mock/financing.ts); otherwise to the merchant.
-  let paid: { txHash: Hex; feeMinor: bigint; gasWei: bigint } | null = null;
+  let paid: { txHash: Hex; feeMinor: bigint } | null = null;
   for (const route of hooks.invoiceCollect) paid ??= route(s, record, c, amount);
   paid ??= collect(s, c, {
     amount,

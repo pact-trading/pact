@@ -3,7 +3,6 @@ const t = await open(process.argv[2]);
 const { page, step, shot, call, errors } = t;
 try {
   await readyMerchant(t);
-  const before = await call('merchant', '/v1/gas-tank');
   const previousRun = (await call('merchant', '/v1/security/drain-runs')).data[0]?.id;
   await step('merchant: run the drain attack', async () => {
     await page.goto(`${base}/dashboard/security`);
@@ -12,7 +11,7 @@ try {
     await page.waitForTimeout(8000);
     await shot('51-drain-run');
   });
-  await step('every attempt refused, tank unchanged, layers counted', async () => {
+  await step('every attempt refused, merchant USDT unchanged, layers counted', async () => {
     // The run is stored when every attempt has been tried: seconds on a fork, a minute or two on the testnet.
     let run;
     for (let i = 0; i < 120 && !run; i++) {
@@ -23,8 +22,9 @@ try {
     if (!run) throw new Error('no drain run stored');
     const sent = run.attempts.filter(a => a.result !== 'refused');
     if (sent.length) throw new Error(`attempts not refused: ${JSON.stringify(sent)}`);
-    const after = await call('merchant', '/v1/gas-tank');
-    if (after.balanceWei !== before.balanceWei) throw new Error('tank moved');
+    if (run.merchantBalanceBeforeMinor === null || run.merchantBalanceAfterMinor === null)
+      throw new Error('merchant balance unreadable');
+    if (run.merchantBalanceAfterMinor !== run.merchantBalanceBeforeMinor) throw new Error('merchant USDT moved');
     const layers = (await call('merchant', '/v1/security/layers')).data;
     console.log(
       `  ${run.attempts.length} attempts refused; blocked per layer: ${layers.map(l => `${l.id}:${l.blocked}`).join(' ')}`,

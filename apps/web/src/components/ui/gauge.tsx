@@ -1,6 +1,6 @@
 import { cn } from '@/lib/cn';
 
-/** A ring gauge, e.g. gas tank runway in days against a target. */
+/** A ring gauge: a value against a target, such as days left against a month. */
 export function Gauge({
   value,
   max,

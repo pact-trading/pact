@@ -86,8 +86,8 @@ export default async function PurchasePage({ params }: { params: Promise<{ id: s
               network: 'Whitechain Sepolia (chain 1874)',
               payerAccount: payment.payer,
               merchantAccount: '',
-              gasPaidBy: `${detail.merchantName}'s gas tank`,
-              gasWei: payment.gasWei,
+              gasPaidBy: 'Pact',
+              gasWei: null,
             }}
             txHash={payment.txHash}
           />

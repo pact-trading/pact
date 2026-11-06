@@ -1,18 +1,22 @@
 import 'server-only';
 import { randomBytes } from 'node:crypto';
 import type {
+  AcceptedTerms,
+  ApprovalReadiness,
   DashboardSummary,
   ExportReport,
+  FeeLedgerEntry,
   FeePreview,
+  FeesDetail,
+  FeeTermsOffer,
   MerchantSettings,
+  MerchantSpender,
   WebhookDelivery,
   WebhookEvent,
 } from '@pactagent/core/api-types';
 import type { Customer, Order, Product } from '@pactagent/core/commerce-types';
 import type {
   DrainRun,
-  GasLedgerEntry,
-  GasTankDetail,
   OrderListItem,
   PlanSummary,
   RefusalEvent,
@@ -20,7 +24,7 @@ import type {
 } from '@pactagent/core/platform-types';
 import { reasonDetail } from '@/lib/reasons';
 import { merchantApi, publicApi, sessionApi, SessionError } from '../../api-client';
-import { DataError, NotWiredError } from '../errors';
+import { DataError, NotWiredError, approvalUnavailable } from '../errors';
 import type { CheckoutState, DataSource, MerchantPreferences, NotificationPreferences, OrderDetail, SignRequest } from '../types';
 import { createApiCommerce, type ApiManualOrder } from './commerce-extras';
 import { createApiFinancing } from './financing';
@@ -31,7 +35,7 @@ import { hold, peek, take } from './pending';
 
 /**
  * Reads and writes through the Pact API with the visitor's session.
- * Screens whose endpoints do not exist yet throw NotWiredError.
+ * Screens whose endpoints do not exist yet throw NotWiredError; docs/wiring-backlog.md lists them.
  */
 
 type ApiOrderDetail = {
@@ -42,8 +46,8 @@ type ApiOrderDetail = {
     txHash: string | null;
     financialStatus: string;
     refundDeadline: string | null;
+    /** Pact's fee taken from the payment; null until the charge confirms. */
     feeMinor?: string | null;
-    gasWei?: string | null;
     payer?: string | null;
   } | null;
   refunds: Array<{
@@ -65,6 +69,10 @@ const refusalMessages: Record<string, string> = {
   discount_expired: 'That discount code has expired or has not started yet.',
   discount_exhausted: 'That discount code has reached its limit.',
   discount_below_minimum: 'This discount brings the price below the 1.00 USDT minimum.',
+  subscription_pending: 'A payment for this subscription is still confirming. Try again in a moment.',
+  fee_terms_required: 'This business has not finished setting up payments yet.',
+  amount_below_fee: 'This amount is below the minimum this business can accept.',
+  sponsorship_budget: 'This business has reached today’s limit of free actions. Try again tomorrow.',
 };
 const api = async <T>(path: string, init?: RequestInit): Promise<T> => {
   try {
@@ -120,7 +128,6 @@ function toDetail(
           id: detail.order.paymentId,
           txHash: detail.payment?.txHash ?? null,
           feeMinor: detail.payment?.feeMinor ?? '0',
-          gasWei: detail.payment?.gasWei ?? '0',
           payer: (detail.payment?.payer as `0x${string}` | null | undefined) ?? null,
         }
       : null,
@@ -180,15 +187,13 @@ const sessionBase = (sessionId: string) =>
     ? `/v1/commerce/me/payments/${encodeURIComponent(sessionId.slice(HOSTED.length))}`
     : `/v1/commerce/checkout-sessions/${encodeURIComponent(sessionId)}`;
 
+/** USDT permit readiness: when the allowance is missing, the EIP-2612 permit the payer signs. */
 type Readiness = {
   status: 'needs_funding' | 'needs_approval' | 'ready' | 'pending' | 'unavailable';
   reason?: string;
-  message: string | null;
-  approvalNonce: string | null;
-  authorizationNonce: string | null;
+  permitNonce: string | null;
   deadline: string | null;
-  authorizationRequired: boolean;
-  delegate: string;
+  typedData: Record<string, unknown> | null;
 };
 /** The relayed approval confirms within a few blocks; the payment can only be prepared after it. */
 async function waitUntilReady(base: string, seconds = 45): Promise<Readiness> {
@@ -263,7 +268,7 @@ async function hostedSession(id: string): Promise<CheckoutState> {
       network: 'Whitechain Sepolia (chain 1874)',
       payerAccount: null,
       merchantAccount: p.merchant,
-      gasPaidBy: p.brand.brandName ? `${p.brand.brandName}'s gas tank` : "The business's gas tank",
+      gasPaidBy: 'Pact',
       gasWei: null,
     },
     methods: [{ kind: 'account' }],
@@ -302,9 +307,11 @@ export const apiSource: DataSource = {
     updateSettings: update => mPost<MerchantSettings>('/v1/settings', update),
     feePreview: () => mApi<FeePreview>('/v1/fees/preview'),
     async overview() {
-      const [summary, settings] = await Promise.all([
+      const [summary, settings, fees] = await Promise.all([
         mApi<DashboardSummary>('/v1/dashboard'),
         mApi<MerchantSettings>('/v1/settings'),
+        // The permits are not in the dashboard summary; without them, the signed terms decide.
+        mApi<FeesDetail>('/v1/fees').catch(() => null),
       ]);
       return {
         summary,
@@ -312,9 +319,9 @@ export const apiSource: DataSource = {
           { id: 'account', title: 'Connect your business wallet', done: true },
           { id: 'brand', title: 'Add your business name and logo', done: Boolean(settings.brandName) },
           {
-            id: 'gas',
-            title: 'Fund your gas tank',
-            done: summary.gasTank.available && BigInt(summary.gasTank.balanceWei ?? '0') > 0n,
+            id: 'fees',
+            title: 'Sign the fee terms and refund permits',
+            done: fees ? fees.ready : summary.feeTerms.accepted === true,
           },
           { id: 'integrate', title: 'Add checkout to your store', done: settings.webhook.configured },
           { id: 'test_payment', title: 'Take a test payment', done: summary.metrics.successfulPayments > 0 },
@@ -548,20 +555,87 @@ export const apiSource: DataSource = {
         }))
         .filter(r => !filter?.source || r.source === filter.source);
     },
-    gasTank: () => mApi<GasTankDetail>('/v1/gas-tank'),
-    gasLedger: async (limit = 50) =>
-      (await mApi<{ data: GasLedgerEntry[] }>(`/v1/gas-tank/ledger?limit=${limit}`)).data,
-    updateGasPolicy: update =>
-      mPost<GasTankDetail>('/v1/gas-tank/policy', {
-        ...(update.mode !== undefined && { mode: update.mode }),
-        ...(update.surchargeMinor !== undefined && { surchargeMinor: update.surchargeMinor }),
-        ...(update.lowRunwayAlertDays !== undefined && { lowRunwayAlertDays: update.lowRunwayAlertDays }),
-      }),
-    // The faucet and deposits are transactions from the merchant's own wallet, sent in the browser.
-    claimFaucet: () =>
-      Promise.reject(
-        new DataError('wallet_action', 'Claim WBT to your wallet, then deposit it into the tank.', 400),
-      ),
+    // Fees: the merchant signs the terms once and two standing permits; Pact's relayer submits them.
+    fees: () => mApi<FeesDetail>('/v1/fees'),
+    feeLedger: async (limit = 50) =>
+      (await mApi<{ data: FeeLedgerEntry[] }>(`/v1/fees/ledger?limit=${limit}`)).data,
+    async prepareAcceptTerms() {
+      const offer = await mApi<FeeTermsOffer>('/v1/fees/terms');
+      const { checkout, invoice } = offer.terms;
+      return hold(
+        'fee-terms',
+        { version: offer.version, deadline: offer.deadline },
+        {
+          title: 'Sign Pact’s fee terms',
+          lines: [
+            { label: 'Checkout payments and renewals', value: `${checkout.percent}, at least ${checkout.minimumUsdt} USDT` },
+            {
+              label: 'Invoices',
+              value: `${invoice.percent}, at least ${invoice.minimumUsdt} USDT${invoice.capUsdt ? `, at most ${invoice.capUsdt} USDT` : ''}`,
+            },
+            { label: 'Taken from', value: 'Each payment, before it reaches your wallet' },
+            { label: 'Your customers pay', value: 'No fee and no gas' },
+          ],
+          typedData: offer.typedData,
+          signer: 'merchant',
+        },
+      );
+    },
+    async submitAcceptTerms(token, signature) {
+      const held = (await take('fee-terms', token)) as { version: number; deadline: string };
+      const accepted = await mPost<AcceptedTerms>('/v1/fees/terms/accept', {
+        version: held.version,
+        deadline: held.deadline,
+        signature,
+      });
+      // The relayer submits the acceptance; read again until the chain shows it.
+      return settled(
+        () => mApi<FeesDetail>('/v1/fees'),
+        fees => fees.terms.acceptedVersion >= accepted.acceptedVersion,
+      );
+    },
+    async preparePermit(spender) {
+      const readiness = await mApi<ApprovalReadiness>(`/v1/fees/permits/${spender}`);
+      if (readiness.status === 'ready') throw new DataError('permit_ready', 'This permit is already in place.', 409);
+      if (readiness.status !== 'needs_approval' || !readiness.typedData || !readiness.deadline)
+        throw new DataError(
+          readiness.reason ?? readiness.status,
+          readiness.status === 'pending' ? 'This permit is still confirming. Try again in a moment.' : approvalUnavailable(readiness.reason, 'This permit is not available right now.'),
+          409,
+        );
+      return hold(
+        'fee-permit',
+        { spender, deadline: readiness.deadline, nonce: readiness.permitNonce },
+        {
+          title: spender === 'escrow' ? 'Allow refunds from your wallet' : 'Allow refund network fees in USDT',
+          lines: [
+            {
+              label: 'Allows',
+              value:
+                spender === 'escrow'
+                  ? 'The escrow to send a refund from your wallet when you issue one'
+                  : 'The Router to take a refund’s network fee, in USDT',
+            },
+            { label: 'Spent only on', value: 'Refunds you sign yourself' },
+            { label: 'Network fee to sign', value: 'None: Pact submits it' },
+          ],
+          typedData: readiness.typedData,
+          signer: 'merchant',
+        },
+      );
+    },
+    async submitPermit(token, signature) {
+      const held = (await take('fee-permit', token)) as { spender: MerchantSpender; deadline: string; nonce: string | null };
+      await mPost<ApprovalReadiness>(`/v1/fees/permits/${held.spender}`, {
+        deadline: held.deadline,
+        signature,
+        ...(held.nonce !== null && { nonce: held.nonce }),
+      });
+      return settled(
+        () => mApi<FeesDetail>('/v1/fees'),
+        fees => fees.permits.find(p => p.spender === held.spender)?.status !== 'pending',
+      );
+    },
     securityLayers: async () => (await mApi<{ data: SecurityLayer[] }>('/v1/security/layers')).data,
     // A live run against this merchant: every attempt is refused before broadcast; nothing is spent.
     runDrainSimulation: () =>
@@ -636,9 +710,10 @@ export const apiSource: DataSource = {
       ),
 
     preferences: () => mApi<MerchantPreferences>('/v1/preferences'),
-    updatePreferences: update => mPost<MerchantPreferences>('/v1/preferences', update),
-    depositGas: () =>
-      Promise.reject(new DataError('wallet_action', 'Deposits are sent from your wallet.', 400)),
+    updatePreferences: update =>
+      mPost<MerchantPreferences>('/v1/preferences', {
+        ...(update.brandColor !== undefined && { brandColor: update.brandColor }),
+      }),
     sendReminder: invoicesApi.merchant.sendReminder,
     manualReminders: invoicesApi.merchant.manualReminders,
     cancelReminder: invoicesApi.merchant.cancelReminder,
@@ -798,9 +873,7 @@ export const apiSource: DataSource = {
           network: 'Whitechain Sepolia (chain 1874)',
           payerAccount: null,
           merchantAccount: '',
-          gasPaidBy: detail.brand.brandName
-            ? `${detail.brand.brandName}'s gas tank`
-            : "The business's gas tank",
+          gasPaidBy: 'Pact',
           gasWei: null,
         },
         // The API settles from the payer's Pact account only; card, bank and own wallet are demo-only.
@@ -814,24 +887,17 @@ export const apiSource: DataSource = {
       const base = sessionBase(sessionId);
       const readiness = await api<Readiness>(`${base}/readiness`);
       if (readiness.status === 'needs_approval') {
-        // First payment from this account: a one-time USDT approval, relayed for free, then the payment.
-        if (!readiness.message || readiness.approvalNonce === null || !readiness.deadline)
+        // First payment from this account: a USDT permit Pact's relayer submits for free, then the payment.
+        if (!readiness.typedData || !readiness.deadline)
           throw new DataError('approval_unavailable', 'Payment is not ready yet.', 409);
         return hold(
           'payment-approval',
-          { sessionId, approvalNonce: readiness.approvalNonce, deadline: readiness.deadline },
+          { sessionId, permitNonce: readiness.permitNonce, deadline: readiness.deadline },
           {
             title: 'Confirm payment',
             lines: [],
             typedData: {},
-            approval: {
-              message: readiness.message,
-              delegate: readiness.authorizationRequired ? readiness.delegate : null,
-              nonce:
-                readiness.authorizationRequired && readiness.authorizationNonce !== null
-                  ? Number(readiness.authorizationNonce)
-                  : null,
-            },
+            approval: { typedData: readiness.typedData },
           },
         );
       }
@@ -839,7 +905,7 @@ export const apiSource: DataSource = {
       if (readiness.status === 'needs_funding')
         throw new DataError('needs_funds', 'Your balance is too low for this payment.', 409);
       if (readiness.status !== 'ready')
-        throw new DataError(readiness.reason ?? readiness.status, 'Payment is not available right now.', 409);
+        throw new DataError(readiness.reason ?? readiness.status, approvalUnavailable(readiness.reason, 'Payment is not available right now.'), 409);
       return paymentRequest(sessionId, readiness);
     },
     async submitApproval(token, approval) {
@@ -848,15 +914,14 @@ export const apiSource: DataSource = {
       if (kind === 'change-approval') return subscriptionsApi.submitChangeApproval(token, approval);
       const held = (await take('payment-approval', token)) as {
         sessionId: string;
-        approvalNonce: string;
+        permitNonce: string | null;
         deadline: string;
       };
       const base = sessionBase(held.sessionId);
       await post(`${base}/approval`, {
-        approvalNonce: held.approvalNonce,
         deadline: held.deadline,
         signature: approval.signature,
-        ...(approval.authorization && { authorization: approval.authorization }),
+        ...(held.permitNonce !== null && { nonce: held.permitNonce }),
       });
       return paymentRequest(held.sessionId, await waitUntilReady(base));
     },

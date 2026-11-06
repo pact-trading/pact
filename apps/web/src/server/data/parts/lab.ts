@@ -13,7 +13,7 @@ export type ScenarioId =
   | 'loading'
   | 'error'
   | 'insufficient-funds'
-  | 'gas-empty'
+  | 'terms-unsigned'
   | 'expired'
   | 'overdue'
   | 'renewal-failed'
@@ -55,9 +55,9 @@ export const SCENARIOS: readonly ScenarioInfo[] = [
     group: 'data',
   },
   {
-    id: 'gas-empty',
-    label: 'Gas tank empty',
-    description: 'Kite Labs’ gas tank drops to 0, so sponsored actions are refused.',
+    id: 'terms-unsigned',
+    label: 'Fee terms unsigned',
+    description: 'Kite Labs has not signed Pact’s fee terms, so its payments are refused until it does.',
     group: 'data',
   },
   {
