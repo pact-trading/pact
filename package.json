@@ -19,7 +19,9 @@
     "e2e": "pnpm --filter @pact/web e2e",
     "format": "prettier --write apps/web",
     "format:check": "prettier --check apps/web",
-    "docs:deploy": "node scripts/docs-deploy.mjs"
+    "docs:deploy": "node scripts/docs-deploy.mjs",
+    "bench": "node scripts/bench.mjs",
+    "chaos": "node scripts/chaos.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

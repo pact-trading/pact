@@ -8,6 +8,7 @@ node_modules/
 .next/
 .next-dev/
 .next-preview/
+.next-live/
 .runtime/
 playwright-report/
 test-results/
