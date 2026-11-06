@@ -24,7 +24,7 @@ function fixture() {
     async merchantFor(token: string) { const user = await this.authenticate(token), owner = owners[user.sessionId as keyof typeof owners]; if (!owner) throw new IdentityError('merchant_not_registered', 403); return { ...owner, address: user.wallet.address, kind: 'secret' as const }; },
     async register(token: string) { return this.merchantFor(token); },
   };
-  const app = createApp({ db, chain, identity: identity as unknown as PrivyIdentity, baseUrl: 'http://127.0.0.1:3150', relayer: new Relayer(chain, address(1), allowedTargets(address(2), address(3))) });
+  const app = createApp({ db, chain, identity: identity as unknown as PrivyIdentity, baseUrl: 'http://127.0.0.1:3150', relayer: new Relayer(chain, address(1), allowedTargets({ escrow: address(2), subscription: address(3) })) });
   return { db, chain, app };
 }
 let current = fixture(), sequence = 0;

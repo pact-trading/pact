@@ -9,7 +9,7 @@ import { Relayer } from '../src/relayer.js';
 const merchant = '0x0000000000000000000000000000000000000011' as Address;
 const other = '0x0000000000000000000000000000000000000022' as Address;
 const router = '0x0000000000000000000000000000000000000033' as Address;
-const timestamp = '2026-12-01T00:00:00.000Z';
+const timestamp = '2026-11-01T00:00:00.000Z';
 const databases: Db[] = [];
 afterEach(() => { databases.splice(0).forEach(db => db.close()); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
@@ -19,7 +19,7 @@ function fixture(at = timestamp) {
   const keys = seedMerchant(db, merchant);
   const otherKeys = seedMerchant(db, other);
   const chain = new FakeChain();
-  const gasRead = vi.spyOn(chain, 'gasTank');
+  const termsRead = vi.spyOn(chain, 'merchantFees');
   const auth = { merchantId: keys.merchantId, address: merchant };
   const summary = () => getDashboardSummary(db, chain, auth, () => new Date(at));
   const app = createApp({ db, chain, relayer: new Relayer(chain, router, {}) });
@@ -30,10 +30,9 @@ function fixture(at = timestamp) {
     if (BigInt(captured) > 0n) db.prepare('INSERT INTO accounting_entries(event_id,merchant_id,object_id,kind,amount_minor,tx_hash,occurred_at,block_number) VALUES (?,?,?,?,?,?,?,?)').run(`capture-${id}`, owner, id, 'Payment', captured, `0x${id}`, date, '1');
     if (BigInt(refunded) > 0n) db.prepare('INSERT INTO accounting_entries(event_id,merchant_id,object_id,kind,amount_minor,tx_hash,occurred_at,block_number) VALUES (?,?,?,?,?,?,?,?)').run(`refund-${id}`, owner, id, 'Refund', String(-BigInt(refunded)), `0x${id}`, date, '1');
   };
-  const gas = (id: string, fee: string, cost: string, date = at, owner = keys.merchantId) => {
-    db.prepare('INSERT INTO gas_ledger(id,merchant_id,tx_hash,fee_usdt,cost_wei,created_at) VALUES (?,?,?,?,?,?)')
-      .run(id, owner, `0x${id}`, fee, cost, date);
-    db.prepare('INSERT INTO accounting_entries(event_id,merchant_id,object_id,kind,amount_minor,fee_minor,gas_wei,tx_hash,occurred_at,block_number) VALUES (?,?,?,?,?,?,?,?,?,?)').run(`fee-${id}`, owner, id, 'Fee', '0', fee, cost, `0x${id}`, date, '1');
+  /** A refund's network fee, charged to the merchant in USDT. */
+  const gas = (id: string, fee: string, _cost: string, date = at, owner = keys.merchantId) => {
+    db.prepare('INSERT INTO accounting_entries(event_id,merchant_id,object_id,kind,amount_minor,fee_minor,tx_hash,occurred_at,block_number) VALUES (?,?,?,?,?,?,?,?,?)').run(`fee-${id}`, owner, id, 'Fee', '0', fee, `0x${id}`, date, '1');
   };
   const webhook = (id: string, type: string, objectId: string, payload: object | string = {}, date = at, owner = keys.merchantId) =>
     db.prepare('INSERT INTO webhook_events VALUES (?,?,?,?,?,?)')
@@ -43,7 +42,7 @@ function fixture(at = timestamp) {
   const intent = (id: string, reason: string, tx: string | null, date = at, owner = keys.merchantId) =>
     db.prepare('INSERT INTO intents VALUES (?,?,?,?,?,?,?,?,?)')
       .run(id, owner, merchant, id, '{}', 'refused', reason, tx, date);
-  return { db, keys, otherKeys, chain, gasRead, summary, get, app, payment, gas, webhook, refusal, intent };
+  return { db, keys, otherKeys, chain, termsRead, summary, get, app, payment, gas, webhook, refusal, intent };
 }
 
 describe('dashboard summary', () => {
@@ -59,7 +58,7 @@ describe('dashboard summary', () => {
   });
   it('uses confirmed time for daily volume and includes subscription charges without counting old creation dates', async () => {
     const f = fixture();
-    f.payment('created-last-month', '2000000', '500000', 'partially_refunded', '2026-11-06T00:00:00Z');
+    f.payment('created-last-month', '2000000', '500000', 'partially_refunded', '2026-10-01T00:00:00Z');
     f.db.prepare('UPDATE accounting_entries SET occurred_at=? WHERE object_id=?').run(timestamp, 'created-last-month');
     f.db.prepare('INSERT INTO accounting_entries(event_id,merchant_id,object_id,kind,amount_minor,tx_hash,occurred_at,block_number) VALUES (?,?,?,?,?,?,?,?)').run('renewal', f.keys.merchantId, 'sub', 'Subscription', '3000000', '0x01', timestamp, '2');
     f.gas('today-fee', '10000', '50');
@@ -78,29 +77,29 @@ describe('dashboard summary', () => {
     vi.spyOn(f.chain, 'merchantBalance').mockRejectedValue(new Error('balance RPC failed'));
     const result = await f.summary();
     expect(result.balance).toMatchObject({ available: false, amountUsdt: null, blockNumber: null });
-    expect(result.gasTank.available).toBe(true);
+    expect(result.feeTerms).toEqual({ accepted: false, acceptedVersion: 0, latestVersion: 1 });
     expect(result.today.capturedUsdt).toBe('2.000000');
   });
-  it('bounds a stalled balance read independently without losing the successful tank read', async () => {
+  it('bounds a stalled balance read independently without losing the successful fee-terms read', async () => {
     vi.useFakeTimers();
     const f = fixture();
     vi.spyOn(f.chain, 'merchantBalance').mockImplementation(() => new Promise(() => {}));
     const pending = f.summary();
     await vi.advanceTimersByTimeAsync(2500);
-    expect(await pending).toMatchObject({ balance: { available: false }, gasTank: { available: true } });
+    expect(await pending).toMatchObject({ balance: { available: false }, feeTerms: { accepted: false } });
     expect(vi.getTimerCount()).toBe(0);
   });
   it('sums all-time base units exactly across more than 100 payments and isolates every metric', async () => {
     const f = fixture();
     for (let i = 0; i < 105; i++) f.payment(`payment-${i}`, '1000001', '0', 'captured');
-    f.payment('large-old-payment', '900719925474099312345678', '0', 'captured', '2026-11-06T00:00:00.000Z');
+    f.payment('large-old-payment', '900719925474099312345678', '0', 'captured', '2024-01-01T00:00:00.000Z');
     f.payment('partial', '3000000', '1000000', 'partially_refunded');
     f.payment('full', '2000000', '2000000', 'refunded');
     f.payment('authorized', '0', '0', 'authorized');
     f.payment('open');
     f.payment('other-payment', '999999999999999999999999999', '1000000', 'authorized', timestamp, f.otherKeys.merchantId);
     f.gas('current', '10001', '20');
-    f.gas('old', '20002', '800', '2026-11-06T00:00:00.000Z');
+    f.gas('old', '20002', '800', '2024-01-01T00:00:00.000Z');
     f.gas('other', '999999999', '999999999', timestamp, f.otherKeys.merchantId);
     for (const [id, status, owner] of [
       ['active-1', 'active', f.keys.merchantId], ['active-2', 'active', f.keys.merchantId],
@@ -114,25 +113,25 @@ describe('dashboard summary', () => {
       netUsdt: '900719925474099419.315780', feesUsdt: '0.030003',
       totalPayments: 110, successfulPayments: 108, authorizedPayments: 1, activeSubscriptions: 2, financedInvoices: 0,
     });
-    expect(result.volume.at(-1)).toEqual({ date: '2026-12-01', amount: '110.000105' });
-    expect(f.gasRead).toHaveBeenCalledExactlyOnceWith(merchant);
+    expect(result.volume.at(-1)).toEqual({ date: '2026-11-01', amount: '110.000105' });
+    expect(f.termsRead).toHaveBeenCalledExactlyOnceWith(merchant);
   });
 
   it('zero-fills 14 UTC dates across a month boundary using confirmed accounting timestamps', async () => {
     const f = fixture();
-    f.payment('before-window', '99000000', '0', 'captured', '2026-11-17T23:59:59.999Z');
-    f.payment('window-start', '1000000', '0', 'captured', '2026-11-18T00:00:00.000Z');
-    f.payment('last-month', '2000001', '0', 'captured', '2026-11-30T23:59:59.999Z');
-    // Explicit offset normalizes to November 30 in UTC.
-    f.payment('offset', '3000000', '0', 'captured', '2026-12-01T00:30:00+02:00');
+    f.payment('before-window', '99000000', '0', 'captured', '2026-10-18T23:59:59.999Z');
+    f.payment('window-start', '1000000', '0', 'captured', '2026-10-19T00:00:00.000Z');
+    f.payment('last-month', '2000001', '0', 'captured', '2026-10-31T23:59:59.999Z');
+    // Explicit offset normalizes to October 31 in UTC.
+    f.payment('offset', '3000000', '0', 'captured', '2026-11-01T00:30:00+02:00');
     f.payment('today', '4000000', '0', 'captured');
-    f.payment('tomorrow', '5000000', '0', 'captured', '2026-12-02T00:00:00.000Z');
+    f.payment('tomorrow', '5000000', '0', 'captured', '2026-11-02T00:00:00.000Z');
     f.webhook('capture-record', 'payment.captured', 'before-window', {}, timestamp);
     const result = await f.summary();
     expect(result.generatedAt).toBe(timestamp);
     expect(result.timeZone).toBe('UTC');
     expect(result.volume).toEqual(Array.from({ length: 14 }, (_, index) => ({
-      date: new Date(Date.UTC(2026, 10, 18 + index)).toISOString().slice(0, 10),
+      date: new Date(Date.UTC(2026, 9, 19 + index)).toISOString().slice(0, 10),
       amount: index === 0 ? '1.000000' : index === 12 ? '5.000001' : index === 13 ? '4.000000' : '0.000000',
     })));
     expect(result.metrics.capturedUsdt).toBe('114.000001');
@@ -145,49 +144,46 @@ describe('dashboard summary', () => {
     expect(empty.volume).toHaveLength(14);
     expect(empty.volume.every(day => day.amount === '0.000000')).toBe(true);
     expect(empty.recentActivity).toEqual([]);
-    expect(empty.gasTank).toEqual({ available: true, balanceWei: '0', dailyCapWei: '0', spentTodayWei: '0', runwayDays: null });
+    expect(empty.feeTerms).toEqual({ accepted: false, acceptedVersion: 0, latestVersion: 1 });
     f.payment('refunded', '1000000', '1000000', 'refunded');
     f.gas('fee', '1', '0');
     expect((await f.summary()).metrics).toMatchObject({ successfulPayments: 1, netUsdt: '-0.000001', feesUsdt: '0.000001' });
   });
 
-  it('uses only today UTC ledger spend for fractional runway and reports exact RPC strings', async () => {
-    const f = fixture('2026-12-01T18:00:00.000Z');
-    f.chain.tank.set(merchant, { balanceWei: 1n, dailyCapWei: 900719925474099312345678n, spentTodayWei: 999n });
-    f.gas('yesterday', '0', '999', '2026-11-30T23:59:59.999Z');
-    f.gas('start-today', '0', '1', timestamp);
-    f.gas('today', '0', '3');
-    f.gas('next-day', '0', '999', '2026-12-02T00:00:00.000Z');
-    f.gas('other-today', '0', '999', timestamp, f.otherKeys.merchantId);
-    expect((await f.summary()).gasTank).toEqual({ available: true, balanceWei: '1', dailyCapWei: '900719925474099312345678', spentTodayWei: '999', runwayDays: 0.25 });
-    f.db.prepare('DELETE FROM gas_ledger WHERE id IN (?,?)').run('start-today', 'today');
-    f.db.prepare('DELETE FROM accounting_entries WHERE event_id IN (?,?)').run('fee-start-today', 'fee-today');
-    expect((await f.summary()).gasTank.runwayDays).toBeNull();
+  it('reports the fee terms the merchant signed, and counts every fee Pact took', async () => {
+    const f = fixture();
+    f.chain.accepted.set(merchant.toLowerCase(), 1);
+    f.chain.latestVersion = 2;
+    expect((await f.summary()).feeTerms).toEqual({ accepted: true, acceptedVersion: 1, latestVersion: 2 });
+    f.payment('sale', '100000000');
+    f.db.prepare("UPDATE accounting_entries SET fee_minor='800000' WHERE event_id='capture-sale'").run();
+    f.gas('refund-gas', '20000', '0');
+    expect((await f.summary()).metrics).toMatchObject({ capturedUsdt: '100.000000', feesUsdt: '0.820000', netUsdt: '99.180000' });
   });
 
-  it('preserves all DB results when the gas RPC fails and never fabricates zero gas fields', async () => {
+  it('preserves all DB results when the fee-terms RPC fails and never fabricates its fields', async () => {
     const f = fixture();
     f.payment('payment', '2000000', '1000000', 'partially_refunded');
     f.gas('fee', '10000', '20');
     f.webhook('event', 'payment.refunded', 'payment', { tx_hash: '0xabc' });
-    f.gasRead.mockRejectedValue(new Error('RPC unavailable'));
+    f.termsRead.mockRejectedValue(new Error('RPC unavailable'));
     const result = await f.summary();
     expect(result.metrics).toMatchObject({ capturedUsdt: '2.000000', refundedUsdt: '1.000000', feesUsdt: '0.010000', netUsdt: '0.990000', successfulPayments: 1 });
     expect(result.volume.at(-1)?.amount).toBe('2.000000');
     expect(result.recentActivity).toHaveLength(1);
-    expect(result.gasTank).toEqual({ available: false, balanceWei: null, dailyCapWei: null, spentTodayWei: null, runwayDays: null });
+    expect(result.feeTerms).toEqual({ accepted: null, acceptedVersion: null, latestVersion: null });
     const response = await f.get();
     expect(response.status).toBe(200);
-    expect((await response.json()).gasTank).toEqual(result.gasTank);
+    expect((await response.json()).feeTerms).toEqual(result.feeTerms);
   });
 
-  it('returns DB metrics within 2500ms when the gas RPC never settles', async () => {
+  it('returns DB metrics within 2500ms when the fee-terms RPC never settles', async () => {
     vi.useFakeTimers();
     const f = fixture();
     f.payment('payment', '2000000', '1000000', 'partially_refunded');
     f.gas('fee', '10000', '20');
     f.webhook('event', 'payment.refunded', 'payment', { tx_hash: '0xabc' });
-    f.gasRead.mockImplementation(() => new Promise(() => {}));
+    f.termsRead.mockImplementation(() => new Promise(() => {}));
     let settled = false;
     const pending = f.summary().then(result => { settled = true; return result; });
     await vi.advanceTimersByTimeAsync(2499);
@@ -198,41 +194,41 @@ describe('dashboard summary', () => {
     expect(result.metrics).toMatchObject({ capturedUsdt: '2.000000', refundedUsdt: '1.000000', feesUsdt: '0.010000', netUsdt: '0.990000' });
     expect(result.volume.at(-1)?.amount).toBe('2.000000');
     expect(result.recentActivity).toHaveLength(1);
-    expect(result.gasTank).toEqual({ available: false, balanceWei: null, dailyCapWei: null, spentTodayWei: null, runwayDays: null });
+    expect(result.feeTerms).toEqual({ accepted: null, acceptedVersion: null, latestVersion: null });
     expect(vi.getTimerCount()).toBe(0);
   });
 
   it('handles an RPC rejection arriving after the dashboard timeout', async () => {
     vi.useFakeTimers();
     const f = fixture();
-    f.gasRead.mockImplementation(() => new Promise((_, reject) => setTimeout(() => reject(new Error('late RPC failure')), 3000)));
+    f.termsRead.mockImplementation(() => new Promise((_, reject) => setTimeout(() => reject(new Error('late RPC failure')), 3000)));
     let settled = false;
     const pending = f.summary().then(result => { settled = true; return result; });
     await vi.advanceTimersByTimeAsync(2500);
     expect(settled).toBe(true);
     const result = await pending;
-    expect(result.gasTank.available).toBe(false);
+    expect(result.feeTerms.accepted).toBeNull();
     // Vitest reports an unhandled rejection if the timed-out RPC is not observed.
     await vi.advanceTimersByTimeAsync(500);
     expect(vi.getTimerCount()).toBe(0);
-    expect(result.gasTank.available).toBe(false);
+    expect(result.feeTerms.accepted).toBeNull();
   });
 
   it('cleans up the timeout after a delayed RPC succeeds before the deadline', async () => {
     vi.useFakeTimers();
     const f = fixture();
-    f.gasRead.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve({ balanceWei: 123n, dailyCapWei: 456n, spentTodayWei: 7n }), 100)));
+    f.termsRead.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve({ acceptedVersion: 1, latestVersion: 2, accepted: null, latest: null, recipient: merchant, usdtPerWbt: 1n, nonce: 0n } as never), 100)));
     const pending = f.summary();
     await vi.advanceTimersByTimeAsync(100);
-    expect((await pending).gasTank).toEqual({ available: true, balanceWei: '123', dailyCapWei: '456', spentTodayWei: '7', runwayDays: null });
+    expect((await pending).feeTerms).toEqual({ accepted: true, acceptedVersion: 1, latestVersion: 2 });
     expect(vi.getTimerCount()).toBe(0);
   });
 
   it('cleans up the timeout after an immediate RPC rejection', async () => {
     vi.useFakeTimers();
     const f = fixture();
-    f.gasRead.mockRejectedValue(new Error('immediate RPC failure'));
-    expect((await f.summary()).gasTank.available).toBe(false);
+    f.termsRead.mockRejectedValue(new Error('immediate RPC failure'));
+    expect((await f.summary()).feeTerms.accepted).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -280,9 +276,9 @@ describe('dashboard summary', () => {
   it('selects the newest ten after deduplication, without synthesizing payment events or exposing payloads', async () => {
     const f = fixture();
     f.payment('silent-payment', '1000000', '0', 'captured');
-    for (let i = 0; i < 12; i++) f.webhook(`event-${i}`, 'payment.captured', `payment-${i}`, { secret: 'never expose', tx_hash: `0x${i}` }, `2026-11-30T12:00:${String(i).padStart(2, '0')}.000Z`);
+    for (let i = 0; i < 12; i++) f.webhook(`event-${i}`, 'payment.captured', `payment-${i}`, { secret: 'never expose', tx_hash: `0x${i}` }, `2026-10-31T12:00:${String(i).padStart(2, '0')}.000Z`);
     f.webhook('malformed', 'webhook.test', 'test', '{broken', timestamp);
-    f.webhook('duplicate-11', 'payment.captured', 'payment-11', { tx_hash: '0x11' }, '2026-11-30T12:00:11.000Z');
+    f.webhook('duplicate-11', 'payment.captured', 'payment-11', { tx_hash: '0x11' }, '2026-10-31T12:00:11.000Z');
     const result = await f.summary();
     expect(result.recentActivity).toHaveLength(10);
     expect(result.recentActivity[0]).toEqual({ id: 'malformed', type: 'webhook.test', objectId: 'test', createdAt: timestamp, txHash: null, reason: null });
@@ -299,11 +295,11 @@ describe('dashboard summary', () => {
     expect((await f.app.request('/v1/dashboard')).status).toBe(401);
     expect((await f.get('invalid')).status).toBe(401);
     expect((await f.get(f.keys.publishableKey)).status).toBe(403);
-    expect(f.gasRead).not.toHaveBeenCalled();
+    expect(f.termsRead).not.toHaveBeenCalled();
     const response = await f.get(f.keys.secretKey, `/v1/dashboard?merchantId=${f.otherKeys.merchantId}&address=${other}`);
     expect(response.status).toBe(200);
     expect((await response.json()).metrics.capturedUsdt).toBe('2.000000');
-    expect(f.gasRead).toHaveBeenCalledExactlyOnceWith(merchant);
+    expect(f.termsRead).toHaveBeenCalledExactlyOnceWith(merchant);
     expect(f.chain.sent).toEqual([]);
     expect(f.db.prepare('SELECT total_changes() AS count').get()).toEqual(before);
     expect((await (await f.get(f.otherKeys.secretKey)).json()).metrics.capturedUsdt).toBe('99.000000');

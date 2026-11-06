@@ -21,17 +21,17 @@ function fixture(kind: 'charge' | 'refund' | 'renew' | 'subscribe' = 'charge') {
   chain.block = 12n;
   const indexer = new Indexer(db, chain, 10n, 2n);
   if (kind === 'charge' || kind === 'refund') {
-    db.prepare('INSERT INTO payments(id,merchant_id,amount_minor,status,captured_minor,refunded_minor,created_at) VALUES (?,?,?,?,?,?,?)').run(paymentId, merchantId, '1000000', kind === 'charge' ? 'open' : 'partially_refunded', kind === 'charge' ? '0' : '1000000', kind === 'charge' ? '0' : '100000', '2026-11-06');
+    db.prepare('INSERT INTO payments(id,merchant_id,amount_minor,status,captured_minor,refunded_minor,created_at) VALUES (?,?,?,?,?,?,?)').run(paymentId, merchantId, '1000000', kind === 'charge' ? 'open' : 'partially_refunded', kind === 'charge' ? '0' : '1000000', kind === 'charge' ? '0' : '100000', '2026-01-01');
     const data = encodeFunctionData({ abi: escrowAbi, functionName: kind, args: kind === 'charge' ? [paymentId, merchant, 1_000_000n, 86400n] : [paymentId, 500_000n, reason] });
     const intent = { signer: kind === 'charge' ? payer : merchant, merchant, target: escrow, nonce: 1n, amount: kind === 'charge' ? 1_000_000n : 500_000n };
-    db.prepare('INSERT INTO intents VALUES (?,?,?,?,?,?,?,?,?)').run('int', merchantId, intent.signer, '1', json({ intent, data }), 'submitted', null, hash, '2026-11-06');
-    if (kind === 'refund') db.prepare('INSERT INTO refunds VALUES (?,?,?,?,?,?,?)').run('ref', paymentId, '500000', 'refund', 'pending', hash, '2026-11-06');
+    db.prepare('INSERT INTO intents VALUES (?,?,?,?,?,?,?,?,?)').run('int', merchantId, intent.signer, '1', json({ intent, data }), 'submitted', null, hash, '2026-01-01');
+    if (kind === 'refund') db.prepare('INSERT INTO refunds VALUES (?,?,?,?,?,?,?)').run('ref', paymentId, '500000', 'refund', 'pending', hash, '2026-01-01');
   } else {
-    db.prepare('INSERT INTO plans(id,merchant_id,name,amount_minor,period_seconds,max_periods,created_at) VALUES (?,?,?,?,?,?,?)').run('plan', merchantId, 'Plan', '1000000', 86400, 12, '2026-11-06');
-    db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,pending_tx_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('sub', merchantId, 'plan', paymentId, payer, kind === 'subscribe' ? 'pending' : 'active', '2026-11-06', hash, '2026-11-06');
+    db.prepare('INSERT INTO plans(id,merchant_id,name,amount_minor,period_seconds,max_periods,created_at) VALUES (?,?,?,?,?,?,?)').run('plan', merchantId, 'Plan', '1000000', 86400, 12, '2026-01-01');
+    db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,pending_tx_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('sub', merchantId, 'plan', paymentId, payer, kind === 'subscribe' ? 'pending' : 'active', '2026-01-01', hash, '2026-01-01');
   }
   const row = (table: string) => db.prepare(`SELECT * FROM ${table}`).get() as Record<string, string>;
-  const event = (contract: ChainEvent['contract'], name: string, args: ChainEvent['args']): ChainEvent => ({ id: `${hash}:${contract}:${name}`, txHash: hash, block: 10n, timestamp: '2026-11-10T00:00:00.000Z', contract, name, args });
+  const event = (contract: ChainEvent['contract'], name: string, args: ChainEvent['args']): ChainEvent => ({ id: `${hash}:${contract}:${name}`, txHash: hash, block: 10n, timestamp: '2026-11-01T00:00:00.000Z', contract, name, args });
   // Override the new adapter lookup so these tests first expose the old indexer's behavior.
   const receipt = vi.fn().mockResolvedValue({ txHash: hash, block: 10n, status: 'reverted', events: [] });
   Object.assign(chain, { receipt });
@@ -51,11 +51,11 @@ describe('confirmed receipt reconciliation', () => {
     expect(f.row('payments')).toMatchObject({ status: 'failed', captured_minor: '0', refunded_minor: '0' });
     await f.indexer.poll();
     expect(f.db.prepare('SELECT * FROM refusal_attempts').all()).toHaveLength(1);
-    expect(f.db.prepare('SELECT * FROM gas_ledger').all()).toHaveLength(0);
+    expect(f.db.prepare("SELECT * FROM accounting_entries WHERE kind='Fee'").all()).toHaveLength(0);
   });
   it('releases only the reverted refund reservation without changing financial amounts', async () => {
     const f = fixture('refund');
-    f.db.prepare('INSERT INTO refunds VALUES (?,?,?,?,?,?,?)').run('another', paymentId, '100000', 'other', 'pending', otherHash, '2026-11-06');
+    f.db.prepare('INSERT INTO refunds VALUES (?,?,?,?,?,?,?)').run('another', paymentId, '100000', 'other', 'pending', otherHash, '2026-01-01');
     f.receipt.mockImplementation(async (h: Hex) => h === hash ? { txHash: hash, block: 10n, status: 'reverted', events: [] } : null);
     await f.indexer.poll();
     expect(f.row('intents')).toMatchObject({ status: 'failed', reason: 'transaction_reverted' });
@@ -67,7 +67,7 @@ describe('confirmed receipt reconciliation', () => {
     const f = fixture(kind);
     const renew = vi.spyOn(f.chain, 'renew');
     await f.indexer.poll();
-    expect(f.row('subscriptions')).toMatchObject({ status: 'paused', pending_tx_hash: null, next_charge_at: '2026-11-06' });
+    expect(f.row('subscriptions')).toMatchObject({ status: 'paused', pending_tx_hash: null, next_charge_at: '2026-01-01' });
     expect(f.row('refusal_attempts')).toMatchObject({ object_id: 'sub', tx_hash: hash, reason: 'transaction_reverted' });
     await runKeeper(f.db, f.chain);
     expect(renew).not.toHaveBeenCalled();
@@ -88,7 +88,7 @@ describe('confirmed receipt reconciliation', () => {
   });
   it('does not equate a successful receipt or Router Executed alone with a captured payment', async () => {
     const f = fixture();
-    const executed = f.event('router', 'Executed', { signer: payer, merchant, nonce: 1n, target: escrow, reimbursement: 123n, feeUSDT: 10000n });
+    const executed = f.event('router', 'Executed', { signer: payer, merchant, nonce: 1n, target: escrow, gasFee: 0n});
     f.chain.logs = [executed];
     f.receipt.mockResolvedValue({ txHash: hash, block: 10n, status: 'success', events: [executed] });
     await f.indexer.poll();
@@ -109,7 +109,7 @@ describe('confirmed receipt reconciliation', () => {
     const f = fixture('renew');
     f.receipt.mockResolvedValue({ txHash: hash, block: 10n, status: 'success', events: [f.event('subscription', 'Charged', { id: otherHash, amount: 1000000n })] });
     await f.indexer.poll();
-    expect(f.row('subscriptions')).toMatchObject({ status: 'reconciliation_required', pending_tx_hash: hash, next_charge_at: '2026-11-06' });
+    expect(f.row('subscriptions')).toMatchObject({ status: 'reconciliation_required', pending_tx_hash: hash, next_charge_at: '2026-01-01' });
     expect(f.row('refusal_attempts').reason).toBe('missing_expected_event');
     const renew = vi.spyOn(f.chain, 'renew');
     await runKeeper(f.db, f.chain);
@@ -118,7 +118,8 @@ describe('confirmed receipt reconciliation', () => {
   it.each(['charge', 'refund'] as const)('settles matching %s events once, recovering logs behind the cursor', async kind => {
     const f = fixture(kind);
     const target = kind === 'charge' ? f.event('escrow', 'Charged', { id: paymentId, payer, merchant, amount: 1_000_000n }) : f.event('escrow', 'Refunded', { id: paymentId, amount: 500_000n, reason });
-    const executed = f.event('router', 'Executed', { signer: kind === 'charge' ? payer : merchant, merchant, nonce: 1n, target: escrow, reimbursement: 123n, feeUSDT: 10000n });
+    // A refund is merchant-signed and pays its gas in USDT on top; a charge pays no gas fee.
+    const executed = f.event('router', 'Executed', { signer: kind === 'charge' ? payer : merchant, merchant, nonce: 1n, target: escrow, gasFee: kind === 'refund' ? 20_000n : 0n });
     f.receipt.mockResolvedValue({ txHash: hash, block: 10n, status: 'success', events: [target, executed] });
     f.db.prepare("INSERT INTO cursor VALUES ('settle','20')").run();
     await f.indexer.poll(); await f.indexer.poll();
@@ -126,7 +127,7 @@ describe('confirmed receipt reconciliation', () => {
     expect(f.row('payments')).toMatchObject({ captured_minor: '1000000', refunded_minor: kind === 'charge' ? '0' : '600000' });
     if (kind === 'refund') expect(f.row('refunds').status).toBe('succeeded');
     expect(f.db.prepare('SELECT * FROM chain_events').all()).toHaveLength(2);
-    expect(f.db.prepare('SELECT * FROM gas_ledger').all()).toHaveLength(1);
+    expect(f.db.prepare("SELECT fee_minor FROM accounting_entries WHERE kind='Fee'").all()).toEqual(kind === 'refund' ? [{ fee_minor: '20000' }] : []);
     expect(f.db.prepare('SELECT * FROM webhook_events').all()).toHaveLength(1);
   });
   it.each(['renew', 'subscribe'] as const)('settles a confirmed %s only from its matching event', async kind => {
@@ -141,7 +142,7 @@ describe('confirmed receipt reconciliation', () => {
     await f.indexer.poll(); await f.indexer.poll();
     expect(f.row('subscriptions')).toMatchObject({ status: 'active', pending_tx_hash: null });
     expect(f.db.prepare('SELECT * FROM webhook_events').all()).toHaveLength(1);
-    if (kind === 'renew') expect(f.row('subscriptions').next_charge_at).toBe('2026-11-11T00:00:00.000Z');
+    if (kind === 'renew') expect(f.row('subscriptions').next_charge_at).toBe('2026-11-02T00:00:00.000Z');
   });
   it('does not settle from getLogs alone while the receipt is missing or errors', async () => {
     const f = fixture('renew');
@@ -149,7 +150,7 @@ describe('confirmed receipt reconciliation', () => {
     f.chain.logs = [event];
     f.receipt.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('timeout'));
     await f.indexer.poll(); await f.indexer.poll();
-    expect(f.row('subscriptions')).toMatchObject({ pending_tx_hash: hash, next_charge_at: '2026-11-06' });
+    expect(f.row('subscriptions')).toMatchObject({ pending_tx_hash: hash, next_charge_at: '2026-01-01' });
     expect(f.db.prepare('SELECT * FROM chain_events').all()).toHaveLength(0);
     f.receipt.mockResolvedValue({ txHash: hash, block: 10n, status: 'success', events: [event] });
     await f.indexer.poll();
@@ -160,7 +161,7 @@ describe('confirmed receipt reconciliation', () => {
     f.receipt.mockResolvedValue(null);
     f.chain.logs = [{ ...f.event('subscription', 'Charged', { id: paymentId, amount: 1000000n }), txHash: otherHash }];
     await f.indexer.poll();
-    expect(f.row('subscriptions')).toMatchObject({ pending_tx_hash: hash, next_charge_at: '2026-11-06' });
+    expect(f.row('subscriptions')).toMatchObject({ pending_tx_hash: hash, next_charge_at: '2026-01-01' });
   });
   it.each(['wrong_hash', 'wrong_block', 'wrong_id', 'wrong_amount', 'wrong_signer', 'wrong_target'] as const)('requires complete event correlation: %s', async mismatch => {
     const f = fixture();
@@ -176,7 +177,7 @@ describe('confirmed receipt reconciliation', () => {
     await f.indexer.poll();
     expect(f.row('intents').status).toBe('reconciliation_required');
     expect(f.row('payments').captured_minor).toBe('0');
-    expect(f.db.prepare('SELECT * FROM gas_ledger').all()).toHaveLength(0);
+    expect(f.db.prepare("SELECT * FROM accounting_entries WHERE kind='Fee'").all()).toHaveLength(0);
   });
   it('does not fail an operation from a receipt for a different hash', async () => {
     const f = fixture();
@@ -202,17 +203,17 @@ describe('confirmed receipt reconciliation', () => {
     const f = fixture('renew');
     f.receipt.mockResolvedValue({ txHash: hash, block: 10n, status: 'success', events: [f.event('subscription', 'Refused', { id: paymentId, reason: 5 })] });
     await f.indexer.poll();
-    expect(f.row('subscriptions')).toMatchObject({ status: 'past_due', retry_count: 0, pending_tx_hash: null, next_charge_at: '2026-11-11T00:00:00.000Z' });
+    expect(f.row('subscriptions')).toMatchObject({ status: 'past_due', retry_count: 0, pending_tx_hash: null, next_charge_at: '2026-11-02T00:00:00.000Z' });
     expect(f.row('refusal_attempts').reason).toBe('insufficient_funds');
     const renew = vi.spyOn(f.chain, 'renew');
-    await runKeeper(f.db, f.chain, new Date('2026-11-10T00:00:01Z'));
+    await runKeeper(f.db, f.chain, new Date('2026-11-01T00:00:01Z'));
     expect(renew).not.toHaveBeenCalled();
   });
 
   it('records a matching Router refusal even if its log was indexed before the intent row', async () => {
     const f = fixture();
     const event = f.event('router', 'Refused', { signer: payer, merchant, nonce: 1n, reason: 7 });
-    f.db.prepare('INSERT INTO chain_events VALUES (?,?,?,?)').run(event.id, '10', hash, '2026-11-06');
+    f.db.prepare('INSERT INTO chain_events VALUES (?,?,?,?)').run(event.id, '10', hash, '2026-01-01');
     f.receipt.mockResolvedValue({ txHash: hash, block: 10n, status: 'success', events: [event] });
     await f.indexer.poll(); await f.indexer.poll();
     expect(f.row('intents')).toMatchObject({ status: 'refused', reason: 'gas_limit' });
@@ -233,13 +234,13 @@ describe('confirmed receipt reconciliation', () => {
   it.each(['wrong_reason', 'missing_executed'] as const)('does not bypass tracked refund ambiguity via the legacy fallback: %s', async mismatch => {
     const f = fixture('refund');
     const refunded = f.event('escrow', 'Refunded', { id: paymentId, amount: 500000n, reason: mismatch === 'wrong_reason' ? otherHash : reason });
-    const executed = f.event('router', 'Executed', { signer: merchant, merchant, nonce: 1n, target: escrow, reimbursement: 123n, feeUSDT: 10000n });
+    const executed = f.event('router', 'Executed', { signer: merchant, merchant, nonce: 1n, target: escrow, gasFee: 0n});
     f.receipt.mockResolvedValue({ txHash: hash, block: 10n, status: 'success', events: mismatch === 'missing_executed' ? [refunded] : [refunded, executed] });
     await f.indexer.poll(); await f.indexer.poll();
     expect(f.row('intents')).toMatchObject({ status: 'reconciliation_required', reason: 'missing_expected_event' });
     expect(f.row('refunds').status).toBe('pending');
     expect(f.row('payments')).toMatchObject({ captured_minor: '1000000', refunded_minor: '100000' });
-    expect(f.db.prepare('SELECT * FROM gas_ledger').all()).toHaveLength(0);
+    expect(f.db.prepare("SELECT * FROM accounting_entries WHERE kind='Fee'").all()).toHaveLength(0);
     expect(f.db.prepare('SELECT * FROM refusal_attempts').all()).toHaveLength(1);
   });
   it('still recovers a successful legacy refund without an intent row', async () => {
@@ -257,7 +258,7 @@ describe('confirmed receipt reconciliation', () => {
 
 describe('receipt adapters', () => {
   it('distinguishes not-found from RPC errors and decodes only configured contract logs', async () => {
-    const addresses = { router: merchant, escrow, subscription: payer, gasTank: '0x0000000000000000000000000000000000000006' } as const;
+    const addresses = { router: merchant, escrow, subscription: payer, fees: '0x0000000000000000000000000000000000000006' } as const;
     const adapter = new ViemChain('http://unused.invalid', `0x${'1'.repeat(64)}`, addresses);
     const getTransactionReceipt = vi.fn();
     const getBlock = vi.fn().mockResolvedValue({ timestamp: 1793491200n });
@@ -274,6 +275,9 @@ describe('receipt adapters', () => {
     expect(getBlock).toHaveBeenCalledExactlyOnceWith({ blockNumber: 10n });
     getTransactionReceipt.mockResolvedValue({ transactionHash: hash, blockNumber: 10n, status: 'reverted', logs: [] });
     expect(await adapter.receipt(hash)).toEqual({ txHash: hash, block: 10n, status: 'reverted', events: [] });
+    // A reverted transaction still cost the relayer its gas: the receipt reports it.
+    getTransactionReceipt.mockResolvedValue({ transactionHash: hash, blockNumber: 10n, status: 'reverted', logs: [], gasUsed: 50_000n, effectiveGasPrice: 5_000_000_000n });
+    expect(await adapter.receipt(hash)).toEqual({ txHash: hash, block: 10n, status: 'reverted', events: [], gasCostWei: 250_000_000_000_000n });
   });
   it('models unknown, failed and successful fake receipts without inventing failure', async () => {
     const chain = new FakeChain();

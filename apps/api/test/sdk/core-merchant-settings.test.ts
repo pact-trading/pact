@@ -14,7 +14,8 @@ describe('merchant settings through actual API', () => {
       await client.settings.update({ refundWindowSeconds: 604800 });
       expect((await browser.payments.get(payment.id)).refundWindowSeconds).toBe(86400);
       expect((await browser.config.get()).checkout).toMatchObject({ brandName: 'Example', refundWindowSeconds: 604800 });
-      expect(await browser.fees.preview(300000)).toMatchObject({ targetGas: 300000, minimumFeeMinor: '340', usdtPerWbtMinor: '1000000' });
+      // 300,000 target gas plus the Router's 60,000, at 1 gwei and 79 USDT per WBT: at most 0.02844 USDT.
+      expect(await browser.fees.preview(300000)).toMatchObject({ targetGas: 300000, maximumGasFeeMinor: '28440', usdtPerWbtMinor: '79000000', minimumAmountMinor: '1000000' });
       const summary = await client.dashboard.get();
       expect(summary.balance).toMatchObject({ available: true, amountUsdt: '0.000000' });
       expect(summary.today?.capturedUsdt).toBe('0.000000');

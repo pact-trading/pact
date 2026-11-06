@@ -8,21 +8,22 @@ import { createApp } from '../src/app.js';
 import { intentTypedData } from '../src/typed-data.js';
 import { USDT } from '../src/approval.js';
 
-const addresses = { router: toHex(1, { size: 20 }), escrow: toHex(2, { size: 20 }), subscription: toHex(3, { size: 20 }), gasTank: toHex(4, { size: 20 }) };
+const addresses = { router: toHex(1, { size: 20 }), escrow: toHex(2, { size: 20 }), subscription: toHex(3, { size: 20 }), fees: toHex(4, { size: 20 }) };
 const signer = privateKeyToAccount(toHex(55, { size: 32 }));
 function fixture() {
   const db = openDb(), keys = seedMerchant(db, signer.address), chain = new FakeChain(true);
-  const relayer = new Relayer(chain, addresses.router, allowedTargets(addresses.escrow, addresses.subscription));
+  const relayer = new Relayer(chain, addresses.router, allowedTargets({ escrow: addresses.escrow, subscription: addresses.subscription }));
   const app = createApp({ db, chain, relayer });
   return { db, keys, chain, relayer, get: (query: string, key = keys.secretKey) => app.request(`/v1/fees/preview${query}`, { headers: { authorization: `Bearer ${key}` } }) };
 }
 describe('merchant fee preview and current Router policy', () => {
-  it('quotes the current configured conversion with ceiling division and no writer mutation', async () => {
+  it('quotes the most a merchant-paid call can cost in USDT, rounded up, with no writer mutation', async () => {
     const f = fixture(); f.chain.price = 1_000_000_001n; f.chain.policy.usdtPerWbt = 3_000_007n;
     const response = await f.get('?maxGas=300000', f.keys.publishableKey);
     expect(response.status).toBe(200);
-    const body = await response.json(), maximum = 340000n * f.chain.price;
-    expect(body).toMatchObject({ chainId: 1874, targetGas: 300000, gasPriceWei: String(f.chain.price), usdtPerWbtMinor: '3000007', maximumReimbursementWei: String(maximum), minimumFeeMinor: String((maximum * 3_000_007n + 10n ** 18n - 1n) / 10n ** 18n) });
+    // The target's gas plus the Router's 60,000 overhead, at the FeeSchedule's WBT price.
+    const body = await response.json(), maximum = 360000n * f.chain.price;
+    expect(body).toMatchObject({ chainId: 1874, targetGas: 300000, gasPriceWei: String(f.chain.price), usdtPerWbtMinor: '3000007', maximumGasFeeMinor: String((maximum * 3_000_007n + 10n ** 18n - 1n) / 10n ** 18n), minimumAmountMinor: '1000000' });
     expect(f.chain.writer.rows()).toHaveLength(0); expect(f.chain.sent).toHaveLength(0);
   });
   it('fails on invalid input, changed limits or unavailable policy without a fabricated default', async () => {
@@ -34,15 +35,16 @@ describe('merchant fee preview and current Router policy', () => {
     const failure = await f.get('?maxGas=100000'); expect(failure.status).toBe(503); expect(await failure.text()).not.toContain('private RPC detail');
     expect(f.chain.writer.rows()).toHaveLength(0);
   });
-  it('revalidates the actual conversion quote before submit rather than accepting a stale cheap fee', async () => {
+  it('revalidates the current WBT price before submit: a fee smaller than the gas is refused', async () => {
     const f = fixture();
     const data = encodeFunctionData({ abi: escrowAbi, functionName: 'charge', args: [toHex(9, { size: 32 }), signer.address, 2_000_000n, 2592000n] });
-    const intent = { signer: signer.address, merchant: signer.address, target: addresses.escrow, dataHash: keccak256(data), amount: 2_000_000n, feeUSDT: 1000n, nonce: 0n, deadline: BigInt(Math.floor(Date.now() / 1000) + 120), maxGas: 300000 };
+    const intent = { signer: signer.address, merchant: signer.address, target: addresses.escrow, dataHash: keccak256(data), amount: 2_000_000n, nonce: 0n, deadline: BigInt(Math.floor(Date.now() / 1000) + 120), maxGas: 300000 };
     const request = { intent, data, signature: await signer.signTypedData(intentTypedData(intent, addresses.router)) };
-    f.chain.policy.usdtPerWbt = 100_000_000n;
-    await expect(f.relayer.submit(request)).rejects.toMatchObject({ code: 'fee_too_low' });
+    // At a million USDT per WBT, the 0.15 USDT minimum fee no longer covers the call's gas.
+    f.chain.policy.usdtPerWbt = 1_000_000_000_000n;
+    await expect(f.relayer.submit(request)).rejects.toMatchObject({ code: 'fee_below_gas' });
     expect(f.chain.sent).toHaveLength(0);
-    f.chain.policy.usdtPerWbt = 1_000_000n;
+    f.chain.policy.usdtPerWbt = 79_000_000n;
     await expect(f.relayer.submit(request)).resolves.toMatch(/^0x/);
   });
 });

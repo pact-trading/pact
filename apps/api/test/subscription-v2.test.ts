@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { privateKeyToAccount } from 'viem/accounts';
-import { hashTypedData, keccak256, toHex, type Hex } from 'viem';
+import { hashTypedData, keccak256, toHex } from 'viem';
 import { openDb, seedMerchant } from '../src/db.js';
 import { FakeChain } from '../src/chain.js';
 import { Relayer, allowedTargets } from '../src/relayer.js';
 import { createApp } from '../src/app.js';
-import { cancellationTypedData, consentTypedData, mandateTypedData } from '../src/typed-data.js';
+import { cancellationTypedData, mandateTypedData } from '../src/typed-data.js';
 import { bindSubscriptions } from '../src/subscription-binding.js';
 import { Indexer } from '../src/indexer.js';
 import { readSubscriptionMandate } from '../src/subscription-mandates.js';
@@ -15,20 +15,17 @@ const payer = privateKeyToAccount(`0x${'1'.repeat(64)}`);
 const merchant = privateKeyToAccount(`0x${'3'.repeat(64)}`);
 const addresses = { router: '0x0000000000000000000000000000000000000001', escrow: '0x0000000000000000000000000000000000000002', subscription: '0x0000000000000000000000000000000000000003' } as const;
 function fixture() {
-  const db = openDb(); const chain = new FakeChain(true, 2);
+  const db = openDb(); const chain = new FakeChain(true);
   const keys = seedMerchant(db, merchant.address);
-  const relayer = new Relayer(chain, addresses.router, allowedTargets(addresses.escrow, addresses.subscription, 2));
+  const relayer = new Relayer(chain, addresses.router, allowedTargets({ escrow: addresses.escrow, subscription: addresses.subscription }));
   const app = createApp({ db, chain, relayer, ...addresses });
   const post = (path: string, body: unknown, key = keys.secretKey) => app.request(path, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(body, (_, v) => typeof v === 'bigint' ? v.toString() : v) });
   return { db, chain, keys, app, post };
 }
-async function request(f: ReturnType<typeof fixture>, version: '1' | '2' = '2') {
+async function request(f: ReturnType<typeof fixture>) {
   const plan = await (await f.post('/v1/subscriptions/plans', { name: 'Monthly', amount: '2', periodSeconds: 86400, maxPeriods: 12 })).json();
   const mandate = { payer: payer.address, merchant: merchant.address, planId: keccak256(toHex(plan.id)), amountCap: 2_000_000n, periodSeconds: 86400n, maxPeriods: 12, endTime: BigInt(Math.floor(Date.now() / 1000) + 30 * 86400), nonce: 0n };
-  const typed = mandateTypedData(mandate, addresses.subscription, version);
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
-  const merchantConsent = { deadline, signature: await merchant.signTypedData(consentTypedData(hashTypedData(typed), deadline, addresses.subscription)) };
-  return { planId: plan.id, mandate, signature: await payer.signTypedData(typed), merchantConsent };
+  return { planId: plan.id, mandate, signature: await payer.signTypedData(mandateTypedData(mandate, addresses.subscription)) };
 }
 describe('subscription V2 API integration', () => {
   it('persists the exact signed mandate before submission and exposes only merchant-scoped terms', async () => {
@@ -38,8 +35,6 @@ describe('subscription V2 API integration', () => {
       const stored = readSubscriptionMandate(f.db, args[2]!.objectId)!;
       expect(stored.mandate).toEqual(body.mandate);
       expect(stored.payerSignature).toBe(body.signature);
-      expect(stored.merchantConsent).toEqual(body.merchantConsent);
-      expect(stored.version).toBe(2);
       return subscribe(...args);
     });
     const created = await (await f.post('/v1/subscriptions', body)).json();
@@ -48,9 +43,8 @@ describe('subscription V2 API integration', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toBe('no-store');
     const terms = await response.json();
-    expect(terms).toMatchObject({ subscriptionId: created.id, status: 'active', manager: addresses.subscription, version: 2, mandateHash: hashTypedData(mandateTypedData(body.mandate, addresses.subscription, '2')), mandate: { nonce: '0', amountCap: '2000000', endTime: body.mandate.endTime.toString() } });
+    expect(terms).toMatchObject({ subscriptionId: created.id, status: 'active', manager: addresses.subscription, mandateHash: hashTypedData(mandateTypedData(body.mandate, addresses.subscription)), mandate: { nonce: '0', amountCap: '2000000', endTime: body.mandate.endTime.toString() } });
     expect(terms).not.toHaveProperty('payerSignature');
-    expect(terms).not.toHaveProperty('merchantConsent');
     expect((await get(f.keys.publishableKey)).status).toBe(403);
     const other = seedMerchant(f.db, payer.address);
     expect((await get(other.secretKey)).status).toBe(404);
@@ -65,7 +59,7 @@ describe('subscription V2 API integration', () => {
   });
   it('does not invent legacy signed terms or persist rejected signatures', async () => {
     const f = fixture(), body = await request(f);
-    expect((await f.post('/v1/subscriptions', { ...body, merchantConsent: undefined })).status).toBe(422);
+    expect((await f.post('/v1/subscriptions', { ...body, signature: await merchant.signTypedData(mandateTypedData(body.mandate, addresses.subscription)) })).status).toBe(422);
     expect(f.db.prepare('SELECT * FROM subscription_mandates').all()).toHaveLength(0);
     f.db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,created_at) VALUES (?,?,?,?,?,?,?,?)').run('legacy', f.keys.merchantId, body.planId, keccak256(toHex('legacy')), payer.address, 'active', new Date().toISOString(), new Date().toISOString());
     const response = await f.app.request('/v1/subscriptions/legacy/mandate', { headers: { authorization: `Bearer ${f.keys.secretKey}` } });
@@ -81,40 +75,35 @@ describe('subscription V2 API integration', () => {
     expect(f.chain.writer.rows()).toHaveLength(0);
     expect(f.db.prepare('SELECT * FROM subscriptions').all()).toHaveLength(0);
   });
-  it('publishes the selected contract version to authenticated checkout clients', async () => {
+  it('publishes the subscription and fee contracts to authenticated checkout clients', async () => {
     const f = fixture();
     const response = await f.app.request('/v1/config', { headers: { authorization: `Bearer ${f.keys.publishableKey}` } });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ subscriptionVersion: 2, subscription: addresses.subscription });
+    const config = await response.json();
+    expect(config).toMatchObject({ subscription: addresses.subscription, router: addresses.router, escrow: addresses.escrow });
+    expect(config).not.toHaveProperty('subscriptionVersion');
   });
-  it('requires exact merchant consent before reserving or sending registration', async () => {
+  it('registers from the payer signature alone, with no merchant consent or gas', async () => {
     const f = fixture(), body = await request(f);
-    const absent = await f.post('/v1/subscriptions', { ...body, merchantConsent: undefined }, f.keys.publishableKey);
-    expect(absent.status).toBe(422); expect((await absent.json()).error.code).toBe('merchant_consent_required');
-    const wrong = await payer.signTypedData(consentTypedData(hashTypedData(mandateTypedData(body.mandate, addresses.subscription, '2')), body.merchantConsent.deadline, addresses.subscription));
-    const response = await f.post('/v1/subscriptions', { ...body, merchantConsent: { ...body.merchantConsent, signature: wrong } });
-    expect((await response.json()).error.code).toBe('invalid_merchant_consent');
-    expect(f.chain.writer.rows()).toHaveLength(0);
     const create = await f.post('/v1/subscriptions', body, f.keys.publishableKey);
     expect(create.status).toBe(200);
     expect((await create.json()).status).toBe('active');
     expect(f.db.prepare('SELECT status FROM subscriptions').get()).toEqual({ status: 'active' });
   });
-  it('rejects expired and altered consent, and V1 payer signatures', async () => {
+  it('rejects signatures for another manager, another signer, or altered terms', async () => {
     const f = fixture(), body = await request(f);
-    for (const deadline of [1n, body.merchantConsent.deadline + 1n, body.mandate.endTime + 1n]) {
-      const response = await f.post('/v1/subscriptions', { ...body, merchantConsent: { ...body.merchantConsent, deadline } });
+    const other = await payer.signTypedData(mandateTypedData(body.mandate, addresses.escrow));
+    const altered = { ...body, mandate: { ...body.mandate, maxPeriods: 11 } };
+    for (const attempt of [{ ...body, signature: other }, altered]) {
+      const response = await f.post('/v1/subscriptions', attempt);
       expect(response.status).toBe(422);
-      expect((await response.json()).error.code).toBe('invalid_merchant_consent');
+      expect((await response.json()).error.code).toBe('invalid_signature');
     }
-    const response = await f.post('/v1/subscriptions', { ...body, signature: await payer.signTypedData(mandateTypedData(body.mandate, addresses.subscription, '1')) });
-    expect(response.status).toBe(422); expect((await response.json()).error.code).toBe('invalid_signature');
     expect(f.chain.writer.rows()).toHaveLength(0);
   });
-  it('cancels with payer signature while the merchant tank is empty', async () => {
+  it('cancels with the payer signature at no cost to the merchant', async () => {
     const f = fixture();
     const sub = await (await f.post('/v1/subscriptions', await request(f))).json();
-    f.chain.tank.set(merchant.address.toLowerCase(), { balanceWei: 0n, dailyCapWei: 0n, spentTodayWei: 0n });
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
     const signature = await payer.signTypedData(cancellationTypedData(sub.chainId, deadline, addresses.subscription));
     const response = await f.post(`/v1/subscriptions/${sub.id}/cancel`, { deadline, signature }, f.keys.publishableKey);
@@ -150,9 +139,12 @@ describe('subscription V2 API integration', () => {
   });
   it('will not reinterpret an existing subscription database as a different deployment', async () => {
     const f = fixture(); await f.post('/v1/subscriptions', await request(f));
-    expect(() => bindSubscriptions(f.db, addresses.subscription, 1)).toThrow('deployment mismatch');
-    expect(() => bindSubscriptions(f.db, merchant.address, 2)).toThrow('deployment mismatch');
-    f.db.exec('DELETE FROM subscription_binding');
-    expect(() => bindSubscriptions(f.db, addresses.subscription, 2)).toThrow('deployment mismatch');
+    expect(() => bindSubscriptions(f.db, merchant.address)).toThrow('deployment mismatch');
+    expect(() => bindSubscriptions(f.db, addresses.subscription)).not.toThrow();
+  });
+  it('refuses to rebind a database that holds subscriptions from the previous contract', async () => {
+    const f = fixture(); await f.post('/v1/subscriptions', await request(f));
+    f.db.exec('DROP TABLE subscription_binding; CREATE TABLE subscription_binding(id INTEGER PRIMARY KEY, address TEXT NOT NULL, version INTEGER NOT NULL)');
+    expect(() => bindSubscriptions(f.db, addresses.subscription)).toThrow('earlier SubscriptionManager');
   });
 });

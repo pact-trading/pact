@@ -5,7 +5,7 @@ import { AccountWriter } from '../src/account-writer.js';
 import { openDb } from '../src/db.js';
 import { X402WriteCoordinator } from '../src/x402/write-coordinator.js';
 import { ViemChain } from '../src/chain.js';
-import { ViemX402WritePorts, inactiveM7SponsorshipPolicy } from '../src/x402/viem-write-ports.js';
+import { ViemX402WritePorts, inactiveSponsorshipPolicy } from '../src/x402/viem-write-ports.js';
 import { EXACT } from '../src/x402/constants.js';
 import type { SponsorshipRequest, X402Transaction } from '../src/x402/write-ports.js';
 
@@ -23,7 +23,7 @@ async function fixture() {
     res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
   });
   servers.push(server); await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
-  const chain = new ViemChain(`http://127.0.0.1:${(server.address() as { port: number }).port}`, toHex(0x402a11cen, { size: 32 }), { router: EXACT, escrow: EXACT, gasTank: EXACT, subscription: EXACT });
+  const chain = new ViemChain(`http://127.0.0.1:${(server.address() as { port: number }).port}`, toHex(0x402a11cen, { size: 32 }), { router: EXACT, escrow: EXACT, fees: EXACT, subscription: EXACT });
   return { chain, ports: new ViemX402WritePorts(chain), calls, setChain: (id: number) => chainId = id };
 }
 const request: X402Transaction & { maxFeePerGas: bigint } = { chainId: 1874, to: EXACT, data: '0x12345678', value: 0n, gas: 500_000n, maxFeePerGas: 2_000_000_000n };
@@ -72,11 +72,11 @@ describe('existing ViemChain x402 signing bridge (mock RPC, real synthetic signa
     const { ports, chain } = await fixture();
     const db = openDb();
     try {
-      expect(() => new X402WriteCoordinator({ db, ports, writer: new AccountWriter(chain.writer.relayer), sponsorship: inactiveM7SponsorshipPolicy, maxSpendPerMinuteWei: 1n, confirmations: 2n })).toThrow('x402_shared_writer_required');
-      expect(new X402WriteCoordinator({ db, ports, writer: chain.writer, sponsorship: inactiveM7SponsorshipPolicy, maxSpendPerMinuteWei: 1n, confirmations: 2n }).address).toBe(chain.writer.relayer);
+      expect(() => new X402WriteCoordinator({ db, ports, writer: new AccountWriter(chain.writer.relayer), sponsorship: inactiveSponsorshipPolicy, maxSpendPerMinuteWei: 1n, confirmations: 2n })).toThrow('x402_shared_writer_required');
+      expect(new X402WriteCoordinator({ db, ports, writer: chain.writer, sponsorship: inactiveSponsorshipPolicy, maxSpendPerMinuteWei: 1n, confirmations: 2n }).address).toBe(chain.writer.relayer);
     } finally { db.close(); }
   });
   it('has no permissive production sponsorship policy', async () => {
-    await expect(inactiveM7SponsorshipPolicy.authorize({} as SponsorshipRequest)).rejects.toThrow('m7_funded_gateway_required');
+    await expect(inactiveSponsorshipPolicy.authorize({} as SponsorshipRequest)).rejects.toThrow('x402_sponsorship_unconfigured');
   });
 });

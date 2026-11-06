@@ -2,13 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodeAbiParameters, encodeFunctionData, keccak256, toHex, type Hex } from 'viem';
+import { encodeAbiParameters, encodeFunctionData, keccak256, maxUint256, toHex, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { FakeChain, ViemChain, escrowAbi, subscriptionAbi } from '../src/chain.js';
+import { FakeChain, ViemChain, escrowAbi } from '../src/chain.js';
 import { openDb, seedMerchant, type Db } from '../src/db.js';
 import { createApp } from '../src/app.js';
 import { Relayer, allowedTargets } from '../src/relayer.js';
-import { intentTypedData } from '../src/typed-data.js';
+import { cancellationTypedData, intentTypedData, mandateTypedData } from '../src/typed-data.js';
 import { Indexer } from '../src/indexer.js';
 import type { ChainEvent, IntentRequest } from '../src/types.js';
 import type { WriteOperation } from '../src/account-writer.js';
@@ -16,14 +16,16 @@ import { reserveRenewal } from '../src/write-reservations.js';
 import { Refusal } from '../src/types.js';
 
 const account = privateKeyToAccount(`0x${'1'.repeat(64)}`);
-const addresses = { router: '0x0000000000000000000000000000000000000001', escrow: '0x0000000000000000000000000000000000000002', subscription: '0x0000000000000000000000000000000000000003', gasTank: '0x0000000000000000000000000000000000000004' } as const;
+const addresses = { router: '0x0000000000000000000000000000000000000001', escrow: '0x0000000000000000000000000000000000000002', subscription: '0x0000000000000000000000000000000000000003', fees: '0x0000000000000000000000000000000000000004' } as const;
 const files: string[] = [], databases: Db[] = [];
 afterEach(() => { for (const db of databases.splice(0)) if (db.open) db.close(); for (const dir of files.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const wire = (value: unknown) => JSON.stringify(value, (_, v) => typeof v === 'bigint' ? v.toString() : v);
 function fixture(db = openDb()) {
   databases.push(db); const chain = new FakeChain(); const keys = seedMerchant(db, account.address);
-  chain.tank.set(account.address.toLowerCase(), { balanceWei: 10n ** 18n, dailyCapWei: 10n ** 18n, spentTodayWei: 0n });
-  const relayer = new Relayer(chain, addresses.router, allowedTargets(addresses.escrow, addresses.subscription));
+  chain.accepted.set(account.address.toLowerCase(), 1);
+  // A refund pays its gas in USDT on top: the merchant's wallet holds USDT and allows the Router.
+  chain.approval.state = { balance: 100_000_000n, allowance: maxUint256, nonce: 0n };
+  const relayer = new Relayer(chain, addresses.router, allowedTargets({ escrow: addresses.escrow, subscription: addresses.subscription }));
   const app = createApp({ db, chain, relayer, ...addresses });
   const post = async (path: string, body: unknown) => {
     // Recover historical direct-renewal journal images through the low-level
@@ -47,7 +49,7 @@ function restart(snapshot: Buffer) {
   return { db, chain };
 }
 async function intent(data: Hex, nonce = 1n, target: Hex = addresses.escrow, amount = 2_000_000n): Promise<IntentRequest> {
-  const value = { signer: account.address, merchant: account.address, target, dataHash: keccak256(data), amount, feeUSDT: 10000n, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas: 400000 };
+  const value = { signer: account.address, merchant: account.address, target, dataHash: keccak256(data), amount, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas: 400000 };
   return { intent: value, data, signature: await account.signTypedData(intentTypedData(value, addresses.router)) };
 }
 type Kind = 'payment' | 'refund' | 'cancel' | 'subscribe' | 'renew';
@@ -56,7 +58,7 @@ async function setup(kind: Kind) {
   const paymentId = (await (await f.post('/v1/payments', { amount: '2' })).json()).id as Hex;
   const plan = (await (await f.post('/v1/subscriptions/plans', { name: 'Plan', amount: '2', periodSeconds: 86400, maxPeriods: 12 })).json());
   const subChainId = keccak256(toHex('test-subscription'));
-  if (['renew', 'cancel'].includes(kind)) f.db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,retry_count,pending_tx_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('sub_test', f.keys.merchantId, plan.id, subChainId, account.address, 'active', '2026-11-06T00:00:00.000Z', 0, null, new Date().toISOString());
+  if (['renew', 'cancel'].includes(kind)) f.db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,retry_count,pending_tx_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('sub_test', f.keys.merchantId, plan.id, subChainId, account.address, 'active', '2000-01-01T00:00:00.000Z', 0, null, new Date().toISOString());
   let path: string, body: unknown, request: IntentRequest | undefined, targetEvent: { contract: ChainEvent['contract']; name: string; args: ChainEvent['args'] };
   if (kind === 'payment') {
     request = await intent(encodeFunctionData({ abi: escrowAbi, functionName: 'charge', args: [paymentId, account.address, 2_000_000n, 2592000n] })); path = '/v1/intents'; body = request;
@@ -68,21 +70,22 @@ async function setup(kind: Kind) {
     path = `/v1/payments/${paymentId}/refund`; body = { ...request, amount: '1', reason: 'Customer request' };
     targetEvent = { contract: 'escrow', name: 'Refunded', args: { id: paymentId, amount: 1_000_000n, reason } };
   } else if (kind === 'cancel') {
-    request = await intent(encodeFunctionData({ abi: subscriptionAbi, functionName: 'cancel', args: [subChainId] }), 1n, addresses.subscription);
-    path = '/v1/subscriptions/sub_test/cancel'; body = request;
+    // The payer signs the cancellation and Pact's relayer submits it directly: no Router intent.
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
+    path = '/v1/subscriptions/sub_test/cancel'; body = { deadline, signature: await account.signTypedData(cancellationTypedData(subChainId, deadline, addresses.subscription)) };
     targetEvent = { contract: 'subscription', name: 'Cancelled', args: { id: subChainId } };
   } else if (kind === 'renew') {
     path = '/v1/subscriptions/sub_test/renew'; body = {};
     targetEvent = { contract: 'subscription', name: 'Charged', args: { id: subChainId, amount: 2_000_000n, period: 1 } };
   } else {
     const mandate = { payer: account.address, merchant: account.address, planId: keccak256(toHex(plan.id)), amountCap: 2_000_000n, periodSeconds: 86400n, maxPeriods: 12, endTime: BigInt(Math.floor(Date.now() / 1000) + 90000), nonce: 0n };
-    const signature = await account.signTypedData({ domain: { name: 'Settle Subscription', version: '1', chainId: 1874, verifyingContract: addresses.subscription }, types: { Mandate: [{ name: 'payer', type: 'address' }, { name: 'merchant', type: 'address' }, { name: 'planId', type: 'bytes32' }, { name: 'amountCap', type: 'uint256' }, { name: 'periodSeconds', type: 'uint64' }, { name: 'maxPeriods', type: 'uint32' }, { name: 'endTime', type: 'uint64' }, { name: 'nonce', type: 'uint256' }] }, primaryType: 'Mandate', message: mandate });
+    const signature = await account.signTypedData(mandateTypedData(mandate, addresses.subscription));
     path = '/v1/subscriptions'; body = { planId: plan.id, mandate, signature };
     targetEvent = { contract: 'subscription', name: 'Subscribed', args: { id: keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'address' }], [account.address, 0n, addresses.subscription])), payer: account.address, merchant: account.address, planId: mandate.planId } };
   }
   function receipt(hash: Hex, status: 'success' | 'reverted' = 'success') {
     const events: ChainEvent[] = [{ ...targetEvent, id: `${hash}:0`, block: 10n, txHash: hash }];
-    if (request) events.push({ id: `${hash}:1`, block: 10n, txHash: hash, contract: 'router', name: 'Executed', args: { signer: account.address, merchant: account.address, target: request.intent.target, nonce: request.intent.nonce, reimbursement: 0n, feeUSDT: 10000n } });
+    if (request) events.push({ id: `${hash}:1`, block: 10n, txHash: hash, contract: 'router', name: 'Executed', args: { signer: account.address, merchant: account.address, target: request.intent.target, nonce: request.intent.nonce, gasFee: 0n} });
     return { txHash: hash, block: 10n, status, events: status === 'success' ? events : [] };
   }
   return { ...f, path, body, paymentId, request, receipt };
@@ -190,7 +193,7 @@ describe.each(kinds)('%s durable broadcast recovery', kind => {
       }
       return statement;
     }) as typeof f.db.prepare);
-    const method = kind === 'renew' ? 'prepareRenew' : kind === 'subscribe' ? 'prepareSubscribe' : 'prepareIntent';
+    const method = kind === 'renew' ? 'prepareRenew' : kind === 'subscribe' ? 'prepareSubscribe' : kind === 'cancel' ? 'prepareCancel' : 'prepareIntent';
     if (phase === 'nonce') {
       const original = f.chain[method].bind(f.chain);
       vi.spyOn(f.chain, method).mockImplementation((async (...args: unknown[]) => { snapshot = f.db.serialize(); return (original as (...a: unknown[]) => Promise<{ raw: Hex; hash: Hex }>)(...args); }) as never);
@@ -208,7 +211,7 @@ describe.each(kinds)('%s durable broadcast recovery', kind => {
 describe('preparation and reservation boundaries', () => {
   it.each(kinds)('%s preparation rejection sends nothing and does not freeze an unrelated operation or restart', async kind => {
     const f = await setup(kind);
-    const method = kind === 'renew' ? 'prepareRenew' : kind === 'subscribe' ? 'prepareSubscribe' : 'prepareIntent';
+    const method = kind === 'renew' ? 'prepareRenew' : kind === 'subscribe' ? 'prepareSubscribe' : kind === 'cancel' ? 'prepareCancel' : 'prepareIntent';
     vi.spyOn(f.chain, method).mockRejectedValue(new Error('estimation or signing rejected'));
     const send = vi.spyOn(f.chain, 'broadcastTransaction');
     expect((await f.post(f.path, f.body)).status).toBe(400); expect(send).not.toHaveBeenCalled();
@@ -347,7 +350,7 @@ describe('durable shared relayer spending budget', () => {
     f.chain.writer.reserveSpend(third.id, 100n, 100n, at + 60_000);
   });
   it.each([{ gas: 1_000_001n, maxFeePerGas: 1n }, { gas: 100_000n, maxFeePerGas: 100_000_000_001n }])('refuses an excessive direct subscription gas quote before signing', async quote => {
-    const chain = new ViemChain('http://unused.invalid', `0x${'2'.repeat(64)}`, addresses, 2);
+    const chain = new ViemChain('http://unused.invalid', `0x${'2'.repeat(64)}`, addresses);
     const signTransaction = vi.fn(); const sendRawTransaction = vi.fn();
     Object.assign(chain, { account: { signTransaction }, public: { getChainId: vi.fn().mockResolvedValue(1874), getTransactionCount: vi.fn().mockResolvedValue(0) }, wallet: { prepareTransactionRequest: vi.fn().mockResolvedValue({ chainId: 1874, ...quote, maxPriorityFeePerGas: 1n }), sendRawTransaction } });
     await expect(chain.cancelSigned(keccak256(toHex('subscription')), 1n, '0x')).rejects.toThrow('gas budget exceeded');

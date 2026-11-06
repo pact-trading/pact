@@ -13,11 +13,11 @@ const payer = privateKeyToAccount(toHex(77, { size: 32 }));
 function fixture(db = openDb()) {
   const merchant = seedMerchant(db, toHex(4, { size: 20 }), { webhookUrl: 'https://merchant.test/hook', webhookSecret: 'whsec_private' });
   const other = seedMerchant(db, toHex(5, { size: 20 })), chain = new FakeChain(true);
-  const app = createApp({ db, chain, relayer: new Relayer(chain, router, allowedTargets(escrow, subscription)) });
+  const app = createApp({ db, chain, relayer: new Relayer(chain, router, allowedTargets({ escrow: escrow, subscription: subscription })) });
   const req = (path: string, body?: unknown, key = merchant.secretKey, idem?: string) => app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', ...(idem ? { 'idempotency-key': idem } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body, (_, v) => typeof v === 'bigint' ? String(v) : v) }) });
   async function signed(id: Hex, window: bigint, nonce: bigint, authorize = false) {
     const data = encodeFunctionData({ abi: escrowAbi, functionName: authorize ? 'authorize' : 'charge', args: authorize ? [id, toHex(4, { size: 20 }), 2_000_000n, BigInt(Math.floor(Date.now() / 1000) + 3600), window] : [id, toHex(4, { size: 20 }), 2_000_000n, window] });
-    const intent = { signer: payer.address, merchant: toHex(4, { size: 20 }), target: escrow, dataHash: keccak256(data), amount: 2_000_000n, feeUSDT: 10_000n, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 120), maxGas: 300_000 };
+    const intent = { signer: payer.address, merchant: toHex(4, { size: 20 }), target: escrow, dataHash: keccak256(data), amount: 2_000_000n, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 120), maxGas: 300_000 };
     return { intent, data, signature: await payer.signTypedData(intentTypedData(intent, router)) };
   }
   return { db, merchant, other, chain, req, signed };

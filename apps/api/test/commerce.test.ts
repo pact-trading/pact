@@ -8,7 +8,7 @@ import { Indexer } from '../src/indexer.js';
 import { accountantExport } from '../src/export.js';
 import { keccak256, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { ApprovalService, APPROVER } from '../src/approval.js';
+import { ApprovalService } from '../src/approval.js';
 import { intentTypedData } from '../src/typed-data.js';
 import type { Intent } from '../src/types.js';
 const address = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Address;
@@ -21,8 +21,8 @@ function fixture(ready = false) {
     return { userId: `did:privy:${token}`, sessionId: 'session', expiresAt: Math.floor(Date.now() / 1000) + 300, email: '=unsafe@example.test', wallet: { address: token === 'payer' ? payerAccount.address : address(23), id: null } };
   }, async merchantFor() { throw new IdentityError('merchant_not_registered', 403); } } as unknown as PrivyIdentity;
   if (ready) chain.approval.state.allowance = 10_000_000n;
-  const approval = new ApprovalService(db, chain, { enabled: ready, delegate: APPROVER, runtimeHash: keccak256(chain.approval.state.runtime), escrow: address(2), minimumAmount: 1_000_000n });
-  const app = createApp({ db, chain, identity, approval, relayer: new Relayer(chain, address(1), allowedTargets(address(2), address(3))) });
+  const approval = new ApprovalService(db, chain, { enabled: ready, escrow: address(2), minimumAmount: 1_000_000n });
+  const app = createApp({ db, chain, identity, approval, relayer: new Relayer(chain, address(1), allowedTargets({ escrow: address(2), subscription: address(3) })) });
   const req = (path: string, token = a.secretKey, body?: unknown, method = body === undefined ? 'GET' : 'POST', key = 'checkout-1') => app.request(`/v1/commerce${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const createProduct = async () => (await (await req('/products', a.secretKey, { name: 'Design package', description: 'A complete identity', status: 'active', prices: [{ currency: 'USDT', amountMinor: '2000000' }, { currency: 'USD', amountMinor: '299' }] })).json());
   const buy = async (productId: string, key = 'checkout-1') => req('/checkout-sessions', 'payer', { productId, rail: 'whitechain' }, 'POST', key);
@@ -90,7 +90,7 @@ describe('commerce price, ownership and confirmed order contracts', () => {
     const base = `/checkout-sessions/${checkout.session.id}`;
     const prepareResponse = await f.req(`${base}/intent`, 'payer'); expect(prepareResponse.status).toBe(200);
     const prepared = await prepareResponse.json();
-    const asIntent = (v: Record<string, string | number>): Intent => ({ ...v, amount: BigInt(v.amount), feeUSDT: BigInt(v.feeUSDT), nonce: BigInt(v.nonce), deadline: BigInt(v.deadline), maxGas: Number(v.maxGas) }) as Intent;
+    const asIntent = (v: Record<string, string | number>): Intent => ({ ...v, amount: BigInt(v.amount), nonce: BigInt(v.nonce), deadline: BigInt(v.deadline), maxGas: Number(v.maxGas) }) as Intent;
     const signature = await payerAccount.signTypedData(intentTypedData(asIntent(prepared.intent), address(1)));
     const signed = { data: prepared.data, intent: prepared.intent, signature };
     const sent = await f.req(`${base}/intent`, 'payer', signed); expect(sent.status, await sent.clone().text()).toBe(200);

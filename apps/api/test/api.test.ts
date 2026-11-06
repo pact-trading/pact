@@ -7,7 +7,7 @@ import { Relayer, allowedTargets } from '../src/relayer.js';
 import { createApp } from '../src/app.js';
 import { Indexer } from '../src/indexer.js';
 import { deliverWebhooks, signWebhook } from '../src/webhooks.js';
-import { intentTypedData } from '../src/typed-data.js';
+import { cancellationTypedData, intentTypedData, mandateTypedData } from '../src/typed-data.js';
 import { runLegacyTestKeeper as runKeeper } from './helpers/legacy-keeper.js';
 
 const router = '0x0000000000000000000000000000000000000001' as Address;
@@ -18,9 +18,11 @@ const account = privateKeyToAccount(`0x${'1'.repeat(64)}`);
 function fixture(merchantAddress = merchant, autoSettle = false) {
   const db = openDb();
   const chain = new FakeChain(autoSettle);
-  chain.tank.set(merchantAddress.toLowerCase(), { balanceWei: 10n ** 18n, dailyCapWei: 10n ** 18n, spentTodayWei: 0n });
+  chain.accepted.set(merchantAddress.toLowerCase(), 1);
+  // Refunds pay their gas in USDT on top: the merchant holds USDT and allows the Router.
+  chain.approval.state = { balance: 100_000_000n, allowance: 2n ** 256n - 1n, nonce: 0n };
   const keys = seedMerchant(db, merchantAddress, { webhookUrl: 'https://example.test/hook', webhookSecret: 'whsec_test' });
-  const relayer = new Relayer(chain, router, allowedTargets(escrow, subscription));
+  const relayer = new Relayer(chain, router, allowedTargets({ escrow: escrow, subscription: subscription }));
   const app = createApp({ db, chain, relayer });
   const post = (path: string, body: unknown, key = keys.secretKey, idem?: string) => app.request(path, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', ...(idem ? { 'idempotency-key': idem } : {}) }, body: JSON.stringify(body, (_, value: unknown) => typeof value === 'bigint' ? value.toString() : value) });
   const get = (path: string, key = keys.secretKey) => app.request(path, { headers: { authorization: `Bearer ${key}` } });
@@ -28,8 +30,8 @@ function fixture(merchantAddress = merchant, autoSettle = false) {
 }
 async function signed(paymentId: Hex, nonce: bigint, merchantAddress = merchant) {
   const data = encodeFunctionData({ abi: escrowAbi, functionName: 'charge', args: [paymentId, merchantAddress, 2_000_000n, 2_592_000n] });
-  const intent = { signer: account.address, merchant: merchantAddress, target: escrow, dataHash: keccak256(data), amount: 2_000_000n, feeUSDT: 10_000n, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas: 300_000 };
-  const signature = await account.signTypedData({ domain: { name: 'Settle Router', version: '1', chainId: 1874, verifyingContract: router }, types: { Intent: [ { name: 'signer', type: 'address' }, { name: 'merchant', type: 'address' }, { name: 'target', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'amount', type: 'uint256' }, { name: 'feeUSDT', type: 'uint256' }, { name: 'nonce', type: 'uint256' }, { name: 'deadline', type: 'uint64' }, { name: 'maxGas', type: 'uint32' } ] }, primaryType: 'Intent', message: intent });
+  const intent = { signer: account.address, merchant: merchantAddress, target: escrow, dataHash: keccak256(data), amount: 2_000_000n, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas: 300_000 };
+  const signature = await account.signTypedData(intentTypedData(intent, router));
   return { intent: JSON.parse(JSON.stringify(intent, (_, x: unknown) => typeof x === 'bigint' ? x.toString() : x)), signature, data };
 }
 
@@ -76,8 +78,8 @@ describe('Settle API', () => {
     expect((await (await f.get(`/v1/payments/${payment.id}`)).json()).financialStatus).toBe('captured');
     for (const [index, amount] of ['1.000000', '1.000000', '1.000000'].entries()) {
       const data = encodeFunctionData({ abi: escrowAbi, functionName: 'refund', args: [payment.id, parseUnits(amount, 6), keccak256(toHex('Customer request'))] });
-      const intent = { signer: merchantSigner.address, merchant: merchantSigner.address, target: escrow, dataHash: keccak256(data), amount: parseUnits(amount, 6), feeUSDT: 10_000n, nonce: BigInt(index + 2), deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas: 300_000 };
-      const signature = await merchantSigner.signTypedData({ domain: { name: 'Settle Router', version: '1', chainId: 1874, verifyingContract: router }, types: { Intent: [{ name: 'signer', type: 'address' }, { name: 'merchant', type: 'address' }, { name: 'target', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'amount', type: 'uint256' }, { name: 'feeUSDT', type: 'uint256' }, { name: 'nonce', type: 'uint256' }, { name: 'deadline', type: 'uint64' }, { name: 'maxGas', type: 'uint32' }] }, primaryType: 'Intent', message: intent });
+      const intent = { signer: merchantSigner.address, merchant: merchantSigner.address, target: escrow, dataHash: keccak256(data), amount: parseUnits(amount, 6), nonce: BigInt(index + 2), deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas: 300_000 };
+      const signature = await merchantSigner.signTypedData(intentTypedData(intent, router));
       const response = await f.post(`/v1/payments/${payment.id}/refund`, { amount, reason: 'Customer request', intent, signature, data });
       expect(response.status).toBe(index === 2 ? 422 : 200);
       if (index === 2) expect((await response.json()).error.code).toBe('refund_limit');
@@ -95,29 +97,29 @@ describe('Settle API', () => {
     expect((await publicPlan.json()).amount).toBe('2.000000');
     expect((await f.get('/v1/subscriptions/plans/plan_unknown', f.keys.publishableKey)).status).toBe(404);
     const mandate = { payer: account.address, merchant: merchantSigner.address, planId: keccak256(toHex(plan.id)), amountCap: 2_000_000n, periodSeconds: 86400n, maxPeriods: 12, endTime: BigInt(Math.floor(Date.now()/1000)+86400*13), nonce: 0n };
-    const signature = await account.signTypedData({ domain: { name: 'Settle Subscription', version: '1', chainId: 1874, verifyingContract: subscription }, types: { Mandate: [{ name: 'payer', type: 'address' }, { name: 'merchant', type: 'address' }, { name: 'planId', type: 'bytes32' }, { name: 'amountCap', type: 'uint256' }, { name: 'periodSeconds', type: 'uint64' }, { name: 'maxPeriods', type: 'uint32' }, { name: 'endTime', type: 'uint64' }, { name: 'nonce', type: 'uint256' }] }, primaryType: 'Mandate', message: mandate });
+    const signature = await account.signTypedData(mandateTypedData(mandate, subscription));
     const created = await f.post('/v1/subscriptions', { planId: plan.id, mandate, signature }, f.keys.publishableKey);
     expect(created.status).toBe(200);
     const sub = await created.json() as { id: string; chainId: Hex };
     expect((await (await f.get('/v1/subscriptions')).json()).data[0].status).toBe('active');
     await runKeeper(f.db, f.chain);
     await new Indexer(f.db, f.chain).poll();
+    // "Run renewal now" goes to the contract, which refuses a second pull in the same period.
+    f.chain.renewalRefusals.push(2);
     const early = await f.post(`/v1/subscriptions/${sub.id}/renew`, {});
-    expect(early.status).toBe(422);
-    expect((await early.json()).error.code).toBe('too_early');
+    expect(early.status).toBe(200);
+    expect(await early.json()).toMatchObject({ status: 'refused', refusal: 'too_early' });
     expect((await (await f.get('/v1/refusals')).json()).data[0].reason).toBe('too_early');
-    const overCap = await f.post(`/v1/subscriptions/${sub.id}/renew`, { amount: '3.000000' });
-    expect(overCap.status).toBe(422);
-    expect((await overCap.json()).error.code).toBe('cap_exceeded');
-    const data = encodeFunctionData({ abi: subscriptionAbi, functionName: 'cancel', args: [sub.chainId] });
-    const intent = { signer: account.address, merchant: merchantSigner.address, target: subscription, dataHash: keccak256(data), amount: 2_000_000n, feeUSDT: 10_000n, nonce: 8n, deadline: BigInt(Math.floor(Date.now()/1000)+3600), maxGas: 300_000 };
-    const routerSignature = await account.signTypedData({ domain: { name: 'Settle Router', version: '1', chainId: 1874, verifyingContract: router }, types: { Intent: [{ name: 'signer', type: 'address' }, { name: 'merchant', type: 'address' }, { name: 'target', type: 'address' }, { name: 'dataHash', type: 'bytes32' }, { name: 'amount', type: 'uint256' }, { name: 'feeUSDT', type: 'uint256' }, { name: 'nonce', type: 'uint256' }, { name: 'deadline', type: 'uint64' }, { name: 'maxGas', type: 'uint32' }] }, primaryType: 'Intent', message: intent });
-    expect((await f.post(`/v1/subscriptions/${sub.id}/cancel`, { intent, signature: routerSignature, data }, f.keys.publishableKey)).status).toBe(200);
+    // The payer signs a Cancel message and Pact's relayer submits it.
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
+    const cancelSignature = await account.signTypedData(cancellationTypedData(sub.chainId, deadline, subscription));
+    expect((await f.post(`/v1/subscriptions/${sub.id}/cancel`, { deadline, signature: cancelSignature }, f.keys.publishableKey)).status).toBe(200);
     expect((await (await f.get('/v1/subscriptions')).json()).data[0].status).toBe('cancelled');
+    // A pull after the payer cancelled is refused by the contract, and recorded.
     const cancelledRenewal = await f.post(`/v1/subscriptions/${sub.id}/renew`, {});
-    expect((await cancelledRenewal.json()).error.code).toBe('cancelled');
+    expect(await cancelledRenewal.json()).toMatchObject({ status: 'refused', refusal: 'cancelled' });
     const reasons = (await (await f.get('/v1/refusals')).json()).data.filter((item: {objectId:string}) => item.objectId === sub.id).map((item: {reason:string}) => item.reason);
-    expect(reasons).toEqual(expect.arrayContaining(['too_early', 'cap_exceeded', 'cancelled']));
+    expect(reasons).toEqual(expect.arrayContaining(['too_early', 'cancelled']));
   });
   it('scopes keys, deduplicates create and never marks a payment paid before confirmation', async () => {
     const f = fixture();
@@ -134,12 +136,12 @@ describe('Settle API', () => {
     expect(await new Indexer(f.db, f.chain).poll()).toBe(1);
     expect(await new Indexer(f.db, f.chain).poll()).toBe(0);
     expect((await (await f.get(`/v1/payments/${p.id}`)).json()).financialStatus).toBe('captured');
-    const exportData = await (await f.get('/v1/export?format=json')).json() as { rows: unknown[]; totals: { netUSDT: string } };
+    const exportData = await (await f.get('/v1/export?from=2020-01-01&to=2100-01-01&format=json')).json() as { rows: unknown[]; totals: { netUSDT: string } };
     expect(exportData.totals.netUSDT).toBe('2.000000');
     expect(exportData.rows).toHaveLength(1);
     expect((await (await f.post(`/v1/payments/${p.id}/refund`, { amount: '3' })).json()).error.code).toBe('refund_limit');
     expect((await (await f.post(`/v1/payments/${p.id}/refund`, { amount: '1' })).json()).error.code).toBe('signed_intent_required');
-    expect((await f.get('/v1/export?format=csv')).status).toBe(200);
+    expect((await f.get('/v1/export?from=2020-01-01&to=2100-01-01&format=csv')).status).toBe(200);
   });
   it('checks a signed intent, replay and drain guards before sending', async () => {
     const f = fixture();
@@ -228,10 +230,10 @@ describe('Settle API', () => {
     const f = fixture();
     const plan = await (await f.post('/v1/subscriptions/plans', { name: 'Monthly', amount: '2', periodSeconds: 86400 })).json() as { id: string };
     const chainId = `0x${'c'.repeat(64)}`;
-    f.db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,status,next_charge_at,retry_count,created_at) VALUES (?,?,?,?,?,?,?,?)').run('sub_1', f.keys.merchantId, plan.id, chainId, 'active', '2026-11-06T00:00:00.000Z', 0, '2026-11-06T00:00:00.000Z');
-    await runKeeper(f.db, f.chain, new Date('2026-11-07T00:00:00.000Z'));
+    f.db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,status,next_charge_at,retry_count,created_at) VALUES (?,?,?,?,?,?,?,?)').run('sub_1', f.keys.merchantId, plan.id, chainId, 'active', '2020-01-01T00:00:00.000Z', 0, '2020-01-01T00:00:00.000Z');
+    await runKeeper(f.db, f.chain);
     const before = f.db.prepare('SELECT next_charge_at,pending_tx_hash FROM subscriptions WHERE id=?').get('sub_1') as { next_charge_at: string; pending_tx_hash: string };
-    expect(before.next_charge_at).toBe('2026-11-06T00:00:00.000Z');
+    expect(before.next_charge_at).toBe('2020-01-01T00:00:00.000Z');
     expect(before.pending_tx_hash).toMatch(/^0x/);
     f.chain.emit({ id: 's1', txHash: before.pending_tx_hash as Hex, contract: 'subscription', name: 'Charged', args: { id: chainId, amount: 2_000_000n, period: 1 } });
     f.chain.block += 2n;
@@ -253,7 +255,7 @@ describe('Settle API', () => {
     await new Indexer(f.db, f.chain).poll();
     expect((f.db.prepare('SELECT status FROM invoices WHERE id=?').get(invoice.id) as { status: string }).status).toBe('paid');
     expect((f.db.prepare("SELECT COUNT(*) n FROM webhook_events WHERE type='invoice.paid'").get() as { n: number }).n).toBe(1);
-    const exported = await (await f.get('/v1/export')).json() as { rows: Array<Record<string, string>> };
+    const exported = await (await f.get('/v1/export?from=2020-01-01&to=2100-01-01')).json() as { rows: Array<Record<string, string>> };
     expect(exported.rows.some(r => r.Type === 'Invoice' && r['Payment or Invoice ID'] === invoice.id)).toBe(true);
   });
 
@@ -268,7 +270,7 @@ describe('Settle API', () => {
     expect(await (await f.get(`/v1/payments/${payment.id}`)).json()).toMatchObject({ status: 'failed', financialStatus: 'failed', captured: '0.000000', refunded: '0.000000' });
     expect((await (await f.get('/v1/refusals')).json()).data).toMatchObject([{ objectId: payment.id, reason: 'gas_limit', txHash: submitted.txHash }]);
     expect(f.db.prepare('SELECT status,reason FROM intents WHERE id=?').get(submitted.id)).toEqual({ status: 'refused', reason: 'gas_limit' });
-    expect(f.db.prepare('SELECT * FROM gas_ledger').all()).toHaveLength(0);
+    expect(f.db.prepare("SELECT * FROM accounting_entries WHERE kind='Fee'").all()).toHaveLength(0);
   });
 
   it('releases a refused refund reservation, matches settlement by tx and preserves captured balances', async () => {
@@ -279,7 +281,7 @@ describe('Settle API', () => {
     await new Indexer(f.db, f.chain).poll();
     async function refund(nonce: bigint, expectedStatus = 200) {
       const data = encodeFunctionData({ abi: escrowAbi, functionName: 'refund', args: [p.id, 1_000_000n, keccak256(toHex('reason'))] });
-      const intent = { signer: account.address, merchant: account.address, target: escrow, dataHash: keccak256(data), amount: 1_000_000n, feeUSDT: 10_000n, nonce, deadline: BigInt(Math.floor(Date.now()/1000)+3600), maxGas: 400_000 };
+      const intent = { signer: account.address, merchant: account.address, target: escrow, dataHash: keccak256(data), amount: 1_000_000n, nonce, deadline: BigInt(Math.floor(Date.now()/1000)+3600), maxGas: 400_000 };
       const signature = await account.signTypedData(intentTypedData(intent, router));
       const response = await f.post(`/v1/payments/${p.id}/refund`, { amount: '1', reason: 'reason', intent, signature, data });
       expect(response.status).toBe(expectedStatus);
@@ -295,7 +297,7 @@ describe('Settle API', () => {
     expect(f.chain.sent).toHaveLength(1);
     const second = await refund(31n);
     f.chain.emit({ id: 'refund-ok', txHash: second.txHash, contract: 'escrow', name: 'Refunded', args: { id: p.id, amount: 1_000_000n, reason: keccak256(toHex('reason')) } });
-    f.chain.emit({ id: 'router-ok', txHash: second.txHash, contract: 'router', name: 'Executed', args: { signer: account.address, merchant: account.address, nonce: 31n, target: escrow, reimbursement: 123n, feeUSDT: 10_000n } });
+    f.chain.emit({ id: 'router-ok', txHash: second.txHash, contract: 'router', name: 'Executed', args: { signer: account.address, merchant: account.address, nonce: 31n, target: escrow, gasFee: 10_000n } });
     f.chain.block += 2n;
     await new Indexer(f.db, f.chain).poll();
     expect(await (await f.get(`/v1/payments/${p.id}`)).json()).toMatchObject({ status: 'succeeded', financialStatus: 'partially_refunded', captured: '2.000000', refunded: '1.000000' });

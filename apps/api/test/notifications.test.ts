@@ -3,7 +3,6 @@ import { keccak256, type Address, type Hex } from 'viem';
 import { FakeChain } from '../src/chain.js';
 import { createApp } from '../src/app.js';
 import { openDb, seedMerchant } from '../src/db.js';
-import { checkGasRunways } from '../src/gas-alerts.js';
 import { IdentityError, type PrivyIdentity } from '../src/identity.js';
 import { Indexer } from '../src/indexer.js';
 import { deliverNotifications, mailSender } from '../src/notifications.js';
@@ -20,7 +19,7 @@ function fixture({ merchantEmail = true } = {}) {
       ? { userId: 'person-1', sessionId: 's', expiresAt: Math.floor(Date.now() / 1000) + 300, email: BUYER, wallet: { address: address(22), id: null } }
       : { userId: 'person-2', sessionId: 's', expiresAt: Math.floor(Date.now() / 1000) + 300, email: 'other@example.test', wallet: { address: address(33), id: null } };
   }, async merchantFor() { throw new IdentityError('merchant_not_registered', 403); } } as unknown as PrivyIdentity;
-  const app = createApp({ db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets(address(2), address(3))) });
+  const app = createApp({ db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets({ escrow: address(2), subscription: address(3) })) });
   let count = 0;
   const request = async (path: string, token: string, body?: unknown) => {
     const result = await app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/json', 'idempotency-key': `key-${++count}` }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -146,7 +145,7 @@ describe('notification preference routes', () => {
     const f = fixture();
     const first = (await f.request('/v1/notifications/preferences', f.keys.secretKey)).body;
     expect(first).toMatchObject({ email: null });
-    expect(first.events).toContain('gas_tank.low_runway');
+    expect(first.events).not.toContain('gas_tank.low_runway');
     expect((await f.request('/v1/notifications/preferences', f.keys.secretKey, { email: 'Owner@Shop.test', events: ['order.paid'] })).body).toMatchObject({ email: 'owner@shop.test', events: ['order.paid'] });
     for (const body of [{ email: 'nope' }, { email: 'a@b.c\nBcc: x@y.z' }, { events: ['payment.captured'] }, { events: 'order.paid' }, { telegram_chat_id: '1' }, []]) {
       const refused = await f.request('/v1/notifications/preferences', f.keys.secretKey, body);
@@ -220,28 +219,3 @@ describe('notification delivery', () => {
   });
 });
 
-describe('gas runway alert', () => {
-  const low = async (balanceWei: bigint) => {
-    const f = fixture(); await f.setup();
-    f.db.prepare('INSERT INTO gas_ledger(id,merchant_id,tx_hash,cost_wei,created_at) VALUES (?,?,?,?,?)').run('g1', f.keys.merchantId, '0x1', '1000000000000000', new Date().toISOString());
-    vi.spyOn(f.chain, 'gasTank').mockResolvedValue({ balanceWei, dailyCapWei: 0n, spentTodayWei: 0n } as never);
-    return f;
-  };
-  it('alerts once a day below the merchant threshold', async () => {
-    const f = await low(3_000_000_000_000_000n), at = new Date();
-    await checkGasRunways(f.db, f.chain, at); await checkGasRunways(f.db, f.chain, at);
-    expect(f.outbox().map(row => [row.event_type, row.owner_kind, row.subject])).toEqual([['gas_tank.low_runway', 'merchant', 'Your gas tank has about 3 days left']]);
-    await checkGasRunways(f.db, f.chain, new Date(at.getTime() + 86_400_000));
-    expect(f.outbox()).toHaveLength(2);
-    f.db.close();
-  });
-  it('stays quiet with enough runway, with no recent spend, or when disabled', async () => {
-    const enough = await low(70_000_000_000_000_000n);
-    await checkGasRunways(enough.db, enough.chain); expect(enough.outbox()).toEqual([]); enough.db.close();
-    const off = await low(1_000_000_000_000_000n);
-    await off.request('/v1/notifications/preferences', off.keys.secretKey, { events: [] });
-    await checkGasRunways(off.db, off.chain); expect(off.outbox()).toEqual([]); off.db.close();
-    const idle = fixture(); await idle.setup();
-    await checkGasRunways(idle.db, idle.chain); expect(idle.outbox()).toEqual([]); idle.db.close();
-  });
-});

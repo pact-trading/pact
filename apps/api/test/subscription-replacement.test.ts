@@ -1,30 +1,30 @@
 import Database from 'better-sqlite3';
 import { describe, expect, it, vi } from 'vitest';
 import { privateKeyToAccount } from 'viem/accounts';
-import { encodeAbiParameters, encodeFunctionData, hashTypedData, keccak256, toHex, type Hex } from 'viem';
+import { encodeAbiParameters, encodeFunctionData, keccak256, toHex, type Hex } from 'viem';
 import { openDb, seedMerchant } from '../src/db.js';
-import { FakeChain, subscriptionV2Abi } from '../src/chain.js';
+import { FakeChain, subscriptionAbi } from '../src/chain.js';
 import { Relayer, allowedTargets } from '../src/relayer.js';
 import { createApp } from '../src/app.js';
-import { consentTypedData, mandateTypedData, intentTypedData } from '../src/typed-data.js';
+import { mandateTypedData, intentTypedData } from '../src/typed-data.js';
 import { Indexer } from '../src/indexer.js';
 import { readSubscriptionMandate } from '../src/subscription-mandates.js';
 const payer = privateKeyToAccount(`0x${'1'.repeat(64)}`), merchant = privateKeyToAccount(`0x${'3'.repeat(64)}`);
 const addresses = { router: '0x0000000000000000000000000000000000000001', escrow: '0x0000000000000000000000000000000000000002', subscription: '0x0000000000000000000000000000000000000003' } as const;
 async function fixture() {
-  const db = openDb(), chain = new FakeChain(false, 2), keys = seedMerchant(db, merchant.address);
-  chain.tank.set(merchant.address.toLowerCase(), { balanceWei: 10n ** 18n, dailyCapWei: 10n ** 18n, spentTodayWei: 0n });
-  const app = createApp({ db, chain, relayer: new Relayer(chain, addresses.router, allowedTargets(addresses.escrow, addresses.subscription, 2)), ...addresses });
+  const db = openDb(), chain = new FakeChain(false), keys = seedMerchant(db, merchant.address);
+  chain.accepted.set(String(merchant.address.toLowerCase()).toLowerCase(), 1);
+  const app = createApp({ db, chain, relayer: new Relayer(chain, addresses.router, allowedTargets({ escrow: addresses.escrow, subscription: addresses.subscription })), ...addresses });
   const post = (path: string, body: unknown, key = keys.secretKey) => app.request(path, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(body, (_, v) => typeof v === 'bigint' ? v.toString() : v) });
   const oldId = keccak256(toHex('old'));
   db.prepare('INSERT INTO plans(id,merchant_id,name,amount_minor,period_seconds,max_periods,created_at) VALUES (?,?,?,?,?,?,?)').run('old-plan', keys.merchantId, 'Old', '2000000', 86400, 12, new Date().toISOString());
   db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,created_at) VALUES (?,?,?,?,?,?,?,?)').run('old', keys.merchantId, 'old-plan', oldId, payer.address.toLowerCase(), 'active', new Date().toISOString(), new Date().toISOString());
   const plan = await (await post('/v1/subscriptions/plans', { name: 'New', amount: '3', periodSeconds: 86400, maxPeriods: 12 })).json();
   const mandate = { payer: payer.address, merchant: merchant.address, planId: keccak256(toHex(plan.id)), amountCap: 3_000_000n, periodSeconds: 86400n, maxPeriods: 12, endTime: BigInt(Math.floor(Date.now() / 1000) + 86400), nonce: 1n };
-  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300), typed = mandateTypedData(mandate, addresses.subscription, '2');
-  const signature = await payer.signTypedData(typed), consent = await merchant.signTypedData(consentTypedData(hashTypedData(typed), deadline, addresses.subscription));
-  const data = encodeFunctionData({ abi: subscriptionV2Abi, functionName: 'replace', args: [oldId, mandate, signature, deadline, consent] });
-  const intent = { signer: payer.address, merchant: merchant.address, target: addresses.subscription, dataHash: keccak256(data), amount: mandate.amountCap, feeUSDT: 10_000n, nonce: 10n, deadline, maxGas: 500_000 };
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+  const signature = await payer.signTypedData(mandateTypedData(mandate, addresses.subscription));
+  const data = encodeFunctionData({ abi: subscriptionAbi, functionName: 'replace', args: [oldId, mandate, signature] });
+  const intent = { signer: payer.address, merchant: merchant.address, target: addresses.subscription, dataHash: keccak256(data), amount: mandate.amountCap, nonce: 10n, deadline, maxGas: 500_000 };
   const body = { planId: plan.id, data, intent, signature: await payer.signTypedData(intentTypedData(intent, addresses.router)) };
   const newChainId = keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'address' }], [payer.address, 1n, addresses.subscription]));
   const row = (id: string) => db.prepare('SELECT * FROM subscriptions WHERE id=?').get(id) as Record<string, string>;
@@ -32,12 +32,12 @@ async function fixture() {
     for (const [name, args] of [
       ['Subscribed', { id: newChainId, payer: payer.address, merchant: merchant.address, planId: mandate.planId }],
       ['Cancelled', { id: oldId }], ['Replaced', { oldId, newId: newChainId }],
-      ['Executed', { signer: payer.address, merchant: merchant.address, nonce: intent.nonce, target: addresses.subscription, reimbursement: 0n, feeUSDT: intent.feeUSDT }],
+      ['Executed', { signer: payer.address, merchant: merchant.address, nonce: intent.nonce, target: addresses.subscription, gasFee: 0n}],
     ] as const) if (name !== omit) targetChain.emit({ id: `${hash}:${name}`, txHash: hash, contract: name === 'Executed' ? 'router' : 'subscription', name, args });
     targetChain.block += 2n;
     await new Indexer(targetDb, targetChain).poll();
   }
-  return { db, chain, keys, post, body, row, settle, newChainId, mandate, signature, consent, deadline };
+  return { db, chain, keys, post, body, row, settle, newChainId, mandate, signature };
 }
 describe('atomic subscription replacement API', () => {
   it('keeps the old mandate active until a fully matched Router replacement receipt and handles replay', async () => {
@@ -45,7 +45,7 @@ describe('atomic subscription replacement API', () => {
     const response = await f.post('/v1/subscriptions/old/replace', f.body, f.keys.publishableKey);
     expect(response.status).toBe(200);
     const result = await response.json();
-    expect(readSubscriptionMandate(f.db, result.id)).toMatchObject({ mandate: f.mandate, payerSignature: f.signature, merchantConsent: { deadline: f.deadline, signature: f.consent }, manager: addresses.subscription, version: 2 });
+    expect(readSubscriptionMandate(f.db, result.id)).toMatchObject({ mandate: f.mandate, payerSignature: f.signature, manager: addresses.subscription });
     expect(readSubscriptionMandate(f.db, 'old')).toBeUndefined();
     expect(f.row('old')).toMatchObject({ status: 'active', pending_tx_hash: result.txHash });
     expect(f.row(result.id)).toMatchObject({ status: 'pending', pending_tx_hash: result.txHash });
@@ -76,7 +76,7 @@ describe('atomic subscription replacement API', () => {
     vi.spyOn(f.chain, 'broadcastTransaction').mockImplementationOnce(async raw => { await original(raw); throw new Error('accepted then timeout'); });
     const response = await f.post('/v1/subscriptions/old/replace', f.body);
     expect(response.status).toBe(200); const result = await response.json();
-    const db = new Database(f.db.serialize()), chain = new FakeChain(false, 2); chain.writer.bind(db);
+    const db = new Database(f.db.serialize()), chain = new FakeChain(false); chain.writer.bind(db);
     expect(db.prepare('SELECT * FROM relayer_legacy_holds').all()).toHaveLength(0);
     const broadcast = vi.spyOn(chain, 'broadcastTransaction');
     await f.settle(result.txHash, '', chain, db);

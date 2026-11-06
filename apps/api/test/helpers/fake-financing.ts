@@ -1,4 +1,6 @@
 import { decodeFunctionData, type Address, type Hex } from 'viem';
+import { permitAbi } from '../../src/approval-chain.js';
+import { USDT } from '../../src/token.js';
 import { receivablesAbi, registryAbi, type ChainClaim, type ClaimStatus, type FinancingChain, type FinancingEvent, type FinancingReceipt } from '../../src/financing/chain.js';
 import { Refusal } from '../../src/types.js';
 
@@ -45,6 +47,8 @@ export class FakeFinancingChain implements FinancingChain {
   async isOfficer(account: Address) { return this.officers.has(account.toLowerCase()); }
   async usdtBalance(account: Address) { return this.balances.get(account.toLowerCase()) ?? 0n; }
   async allowance(owner: Address, spender: Address) { return this.allowances.get(`${owner.toLowerCase()}:${spender.toLowerCase()}`) ?? 0n; }
+  credits = new Map<string, bigint>();
+  async claimable(account: Address) { return this.credits.get(account.toLowerCase()) ?? 0n; }
   async keeper(functionName: 'closeListing' | 'markDefault', claimId: bigint) {
     this.keeperCalls.push({ functionName, claimId });
     return this.transaction('0x00000000000000000000000000000000000000ee', RECEIVABLES, []);
@@ -54,15 +58,25 @@ export class FakeFinancingChain implements FinancingChain {
   async permit(owner: Address) {
     return { domain: { name: 'Tether USD', version: '1', chainId: 1874, verifyingContract: '0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7' as Address }, nonce: this.nonces.get(`usdt:${owner.toLowerCase()}`) ?? 0n };
   }
-  relayed: Array<{ contract: 'receivables' | 'registry'; functionName: string; args: readonly unknown[]; gas: bigint }> = [];
+  relayed: Array<{ contract: 'receivables' | 'registry' | 'usdt'; functionName: string; args: readonly unknown[]; gas: bigint }> = [];
   /** What a relayed order does: the events the contract would emit, or the name of the error it reverts with. */
-  onRelay: (call: { contract: 'receivables' | 'registry'; functionName: string; args: readonly unknown[] }) => Array<{ name: string; args: Record<string, unknown>; contract?: 'receivables' | 'registry' }> | string = () => [];
-  async relay(contract: 'receivables' | 'registry', data: Hex, gas: bigint) {
-    const { functionName, args = [] } = decodeFunctionData({ abi: contract === 'receivables' ? receivablesAbi : registryAbi, data });
+  onRelay: (call: { contract: 'receivables' | 'registry' | 'usdt'; functionName: string; args: readonly unknown[] }) => Array<{ name: string; args: Record<string, unknown>; contract?: 'receivables' | 'registry' }> | string = () => [];
+  async relay(contract: 'receivables' | 'registry' | 'usdt', data: Hex, gas: bigint) {
+    const { functionName, args = [] } = decodeFunctionData({ abi: contract === 'receivables' ? receivablesAbi : contract === 'usdt' ? permitAbi : registryAbi, data });
     const outcome = this.onRelay({ contract, functionName, args });
     if (typeof outcome === 'string') throw new Refusal('relay_refused', outcome);
     this.relayed.push({ contract, functionName, args, gas });
-    return this.transaction('0x00000000000000000000000000000000000000ee', contract === 'receivables' ? RECEIVABLES : REGISTRY, outcome.map(e => ({ contract, ...e })));
+    // A permit sets the allowance it names, as the token would.
+    if (contract === 'usdt' && functionName === 'permit') this.allowances.set(`${String(args[0]).toLowerCase()}:${String(args[1]).toLowerCase()}`, BigInt(String(args[2])));
+    const to = contract === 'receivables' ? RECEIVABLES : contract === 'usdt' ? USDT : REGISTRY;
+    return this.transaction('0x00000000000000000000000000000000000000ee', to, contract === 'usdt' ? [] : outcome.map(e => ({ contract: contract as 'receivables' | 'registry', ...e })));
+  }
+  /** Records a transaction another chain adapter sent (a Router call) under its own hash. */
+  adopt(hash: Hex, to: Address, events: Array<{ name: string; args: Record<string, unknown>; contract?: 'receivables' | 'registry' }>) {
+    this.block++;
+    const decoded = events.map((e, i) => ({ id: `${hash}:${i}`, block: this.block, txHash: hash, contract: e.contract ?? 'receivables', name: e.name, args: e.args, at: this.time }));
+    this.logs.push(...decoded);
+    this.receipts.set(hash.toLowerCase(), { txHash: hash, block: this.block, status: 'success' as const, from: '0x00000000000000000000000000000000000000ee' as Address, to, events: decoded });
   }
   /**
    * Records a confirmed transaction from `from` to `to` emitting `events` (name and args), and returns

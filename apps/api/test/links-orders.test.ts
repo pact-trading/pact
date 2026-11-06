@@ -13,7 +13,7 @@ function fixture() {
   const db = openDb(), chain = new FakeChain(true);
   const keys = seedMerchant(db, '0x00000000000000000000000000000000000000aa');
   const wallet = new WalletIdentity(db, { origin: 'http://localhost:3000', allowLocalEmail: true });
-  const app = createApp({ db, chain, wallet, identity: new Identities(wallet), relayer: new Relayer(chain, router, allowedTargets(escrow, subscription)), router, escrow, subscription });
+  const app = createApp({ db, chain, wallet, identity: new Identities(wallet), relayer: new Relayer(chain, router, allowedTargets({ escrow: escrow, subscription: subscription })), router, escrow, subscription });
   const call = async (path: string, token: string, body?: unknown) => {
     const r = await app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     return { status: r.status, body: await r.json() };

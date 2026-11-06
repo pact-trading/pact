@@ -14,7 +14,7 @@ function fixture() {
   const db = openDb(), chain = new FakeChain();
   const keys = seedMerchant(db, '0x0000000000000000000000000000000000000004');
   const other = seedMerchant(db, '0x0000000000000000000000000000000000000005');
-  const app = createApp({ db, chain, relayer: new Relayer(chain, router, allowedTargets(escrow, subscription)) });
+  const app = createApp({ db, chain, relayer: new Relayer(chain, router, allowedTargets({ escrow: escrow, subscription: subscription })) });
   const post = (path: string, body: unknown, key = keys.secretKey, idem?: string) => app.request(path, {
     method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', ...(idem ? { 'idempotency-key': idem } : {}) }, body: JSON.stringify(body),
   });
@@ -26,7 +26,7 @@ function fixture() {
 describe('invoice lifecycle', () => {
   it('creates exact line totals, memo and draft; sending is idempotent and drafts never remind', async () => {
     const f = fixture();
-    const body = { customerEmail: 'buyer@example.com', status: 'draft', memo: 'Project deposit', dueAt: '2026-11-06', metadata: { project: 'A' }, lines: [{ description: 'Design', quantity: 3, unitAmount: '1.000001' }] };
+    const body = { customerEmail: 'buyer@example.com', status: 'draft', memo: 'Project deposit', dueAt: '2026-01-01', metadata: { project: 'A' }, lines: [{ description: 'Design', quantity: 3, unitAmount: '1.000001' }] };
     const responses = await Promise.all([f.post('/v1/invoices', body, f.keys.secretKey, 'draft-1'), f.post('/v1/invoices', body, f.keys.secretKey, 'draft-1')]);
     expect(responses.map(x => x.status)).toEqual([200, 200]);
     const [created, replayed] = await Promise.all(responses.map(x => x.json()));

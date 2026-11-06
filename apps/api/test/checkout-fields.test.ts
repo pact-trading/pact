@@ -19,7 +19,7 @@ function fixture() {
     if (token !== 'payer') throw new IdentityError('invalid_identity_token', 401);
     return { userId: 'person-1', sessionId: 'session', expiresAt: Math.floor(Date.now() / 1000) + 300, email: 'buyer@example.test', wallet: { address: address(22), id: null } };
   }, async merchantFor() { throw new IdentityError('merchant_not_registered', 403); } } as unknown as PrivyIdentity;
-  const app = createApp({ db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets(address(2), address(3))) });
+  const app = createApp({ db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets({ escrow: address(2), subscription: address(3) })) });
   let keyCount = 0;
   const request = async (path: string, token: string, body?: unknown, method?: string) => {
     const result = await app.request(path, { method: method ?? (body === undefined ? 'GET' : 'POST'), headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': `key-${++keyCount}` }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });

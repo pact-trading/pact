@@ -25,7 +25,7 @@ function fixture(enabled = true) {
   });
   const client = new PrivyClient({ appId, appSecret: 'synthetic-test-secret', jwtVerificationKey: verificationKey, fetch: fetcher, maxRetries: 0 });
   const identity = new PrivyIdentity(db, { appId, appSecret: 'synthetic-test-secret', verificationKey }, client);
-  const app = createApp({ db, chain, identity: enabled ? identity : undefined, relayer: new Relayer(chain, '0x0000000000000000000000000000000000000001', allowedTargets('0x0000000000000000000000000000000000000002', '0x0000000000000000000000000000000000000003')) });
+  const app = createApp({ db, chain, identity: enabled ? identity : undefined, relayer: new Relayer(chain, '0x0000000000000000000000000000000000000001', allowedTargets({ escrow: '0x0000000000000000000000000000000000000002', subscription: '0x0000000000000000000000000000000000000003' })) });
   const req = (path: string, accessToken = token(), body?: unknown) => app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
   return { app, db, chain, identity, req, fetcher, setUser: (next: Record<string, unknown>) => { user = next; }, user: () => user };
 }

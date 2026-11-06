@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { keccak256, toHex } from 'viem';
-import { PactClient, fetchTransport, mandateTypedData } from '@pactagent/core';
-import { apiFixture, signedCall, signer, subscription, Indexer, APPROVER, USDT, escrow } from './api-fixture.js';
+import { PactClient, cancellationTypedData, fetchTransport, mandateTypedData, permitTypedData } from '@pactagent/core';
+import { apiFixture, signedCall, signer, subscription, Indexer, escrow } from './api-fixture.js';
 const fixtures: ReturnType<typeof apiFixture>[] = [];
 function fixture(autoSettle = true, approval = false) {
   const f = apiFixture(autoSettle, approval); fixtures.push(f);
@@ -31,8 +31,11 @@ describe('core against the real in-process API', () => {
     expect(await c.payments.get(p.id)).toMatchObject({ status: 'refunded', financialStatus: 'refunded', refunded: '2.000000' });
     await expect(c.payments.refund(p.id, { amount: '1', ...await signedCall(p.id, 4n, 'refund', 1_000_000n) })).rejects.toMatchObject({ status: 422, code: 'refund_limit' });
     expect((await c.refusals.list()).data[0].reason).toBe('refund_limit');
-    expect(typeof (await c.gasTank.get()).balanceWei).toBe('string');
-    expect((await c.export()).totals).toMatchObject({ grossUSDT: '0.000000', feesUSDT: '0.030000', netUSDT: '-0.030000' });
+    // Pact took 0.15 USDT (the minimum) from the payment; each refund paid 150,000 gas at 79 USDT per WBT.
+    const fees = await c.fees.get();
+    expect(fees).toMatchObject({ terms: { acceptedVersion: 1, needsAcceptance: false, accepted: { checkout: { bps: 80, minimumUsdt: '0.150000' } } } });
+    expect(fees.ledger.find(e => e.objectId === p.id)).toMatchObject({ feeUsdt: '0.150000', netUsdt: '1.850000' });
+    expect((await c.export()).totals).toMatchObject({ grossUSDT: '0.000000', feesUSDT: '0.173700', netUSDT: '-0.173700' });
     expect(await c.export({ format: 'csv' })).toContain('Payment or Invoice ID');
   });
   it('preserves invoice draft/send/partial payment and settlement workflows', async () => {
@@ -42,13 +45,14 @@ describe('core against the real in-process API', () => {
     expect((await c.invoices.send(invoice.id)).status).toBe('sent');
     const p = await c.invoices.createPayment(invoice.id, { amount: '1' });
     expect(p.invoiceId).toBe(invoice.id);
-    await c.intents.create(await signedCall(p.id, 1n, 'charge', 1_000_000n));
+    // Invoice payments use the escrow's chargeInvoice, at the invoice rate.
+    await c.intents.create(await signedCall(p.id, 1n, 'chargeInvoice', 1_000_000n));
     expect(await c.invoices.get(invoice.id)).toMatchObject({ status: 'partially_paid', paid: '1.000000', remaining: '2.000000' });
     const remainder = await c.invoices.createPayment(invoice.id);
-    await c.intents.create(await signedCall(remainder.id, 2n));
+    await c.intents.create(await signedCall(remainder.id, 2n, 'chargeInvoice'));
     expect((await c.invoices.list()).data[0]).toMatchObject({ id: invoice.id, status: 'paid', paid: '3.000000', remaining: '0.000000' });
   });
-  it('registers a V1 mandate, reads nonce/plans, rejects unconfigured renewal and submits signed cancellation', async () => {
+  it('registers a mandate, reads nonce/plans, runs a renewal through the contract and submits a signed cancellation', async () => {
     const c = fixture().client;
     const plan = await c.subscriptions.createPlan({ name: 'Daily', amount: '2', periodSeconds: 86400, maxPeriods: 12 });
     expect(await c.subscriptions.getPlan(plan.id)).toEqual(plan);
@@ -59,9 +63,11 @@ describe('core against the real in-process API', () => {
     const sub = await c.subscriptions.create({ planId: plan.id, mandate, signature: await signer.signTypedData(mandateTypedData(mandate, subscription)) });
     expect(sub).toMatchObject({ status: 'active' });
     expect((await c.subscriptions.nonce(signer.address)).nonce).toBe('1');
-    await expect(c.subscriptions.renew(sub.id)).rejects.toMatchObject({ status: 422, code: 'automatic_funded_renewal_disabled' });
-    expect(await c.subscriptions.renewalStatus(sub.id)).toMatchObject({ id: sub.id, state: 'disabled' });
-    expect((await c.subscriptions.cancel(sub.id, await signedCall(sub.chainId, 2n, 'cancel'))).status).toBe('submitted');
+    expect(await c.subscriptions.renew(sub.id)).toMatchObject({ id: sub.id, status: 'charged', refusal: null });
+    expect(await c.subscriptions.renewalStatus(sub.id)).toMatchObject({ id: sub.id, state: 'pending' });
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
+    const signature = await signer.signTypedData(cancellationTypedData(sub.chainId, deadline, subscription));
+    expect((await c.subscriptions.cancel(sub.id, { deadline, signature })).status).toBe('submitted');
     expect((await c.subscriptions.list()).data[0].status).toBe('cancelled');
   });
   it.each(['missing', 'reverted', 'no-event'] as const)('reports %s charge receipts without inventing captured amounts', async mode => {
@@ -74,19 +80,20 @@ describe('core against the real in-process API', () => {
     await new Indexer(f.db, f.chain).poll();
     expect(await c.payments.get(p.id)).toMatchObject({ status: mode === 'reverted' ? 'failed' : 'pending', captured: '0.000000', refunded: '0.000000', financialStatus: mode === 'missing' ? 'open' : mode === 'reverted' ? 'failed' : 'reconciliation_required' });
   });
-  it('serializes signed EIP-7702 approval, remains pending without receipt and checks current allowance', async () => {
+  it('sends a signed USDT permit, remains pending without receipt and checks current allowance', async () => {
     const f = fixture(false, true), c = f.client;
     const p = await c.payments.create({ amount: '2' });
     const ready = await c.payments.getApproval(p.id, signer.address);
-    expect(ready).toMatchObject({ status: 'needs_approval', amount: '2000000', balance: '10000000', authorizationNonce: '0' });
-    const authorization = await signer.signAuthorization({ address: ready.delegate, chainId: 1874, nonce: Number(ready.authorizationNonce) });
-    const pending = await c.payments.approve(p.id, { payer: signer.address, approvalNonce: BigInt(ready.approvalNonce!), deadline: BigInt(ready.deadline!), signature: await signer.signMessage({ message: { raw: ready.message! } }), authorization });
+    expect(ready).toMatchObject({ status: 'needs_approval', amount: '2000000', balance: '10000000', permitNonce: '0', spender: escrow });
+    const m = ready.typedData!.message as Record<string, string>;
+    const signature = await signer.signTypedData(permitTypedData(signer.address, m.spender as never, BigInt(m.value), BigInt(m.nonce), BigInt(m.deadline)));
+    const pending = await c.payments.approve(p.id, { payer: signer.address, deadline: BigInt(ready.deadline!), signature });
     expect(pending.status).toBe('pending');
-    expect(JSON.parse(f.requests.at(-1)!.body!).authorization).not.toHaveProperty('v');
+    expect(JSON.parse(f.requests.at(-1)!.body!)).toMatchObject({ payer: signer.address, deadline: ready.deadline, signature });
     expect((await c.payments.getApproval(p.id, signer.address)).status).toBe('pending');
-    f.chain.approval.receipts.set(pending.txHash!, { hash: pending.txHash!, block: 10n, status: 'success', approvals: [{ payer: signer.address, token: USDT, spender: escrow, amount: 2_000_000n, nonce: 0n }] });
+    f.chain.approval.receipts.set(pending.txHash!, { hash: pending.txHash!, block: 10n, status: 'success', approvals: [{ owner: signer.address, spender: escrow, value: BigInt(m.value) }] });
     f.chain.block = 12n;
-    Object.assign(f.chain.approval.state, { code: `0xef0100${APPROVER.slice(2)}`, allowance: 2_000_000n, approvalNonce: 1n });
+    Object.assign(f.chain.approval.state, { allowance: BigInt(m.value), nonce: 1n });
     expect((await c.payments.getApproval(p.id, signer.address)).status).toBe('ready');
     f.chain.approval.state.allowance = 0n;
     expect((await c.payments.getApproval(p.id, signer.address)).status).not.toBe('ready');

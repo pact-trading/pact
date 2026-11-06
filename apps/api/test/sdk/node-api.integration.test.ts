@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createPactNodeClient, PactApiError, mandateV2TypedData, sponsorshipConsentV2TypedData, cancellationV2TypedData } from '@pactagent/node';
-import { apiFixture, signedCall, signer, merchantSigner, subscriptionV2, v2Mandate } from './api-fixture.js';
+import { createPactNodeClient, PactApiError, mandateTypedData, cancellationTypedData } from '@pactagent/node';
+import { apiFixture, signedCall, signer, merchantSigner, subscription, v2Mandate } from './api-fixture.js';
 const fixtures: ReturnType<typeof apiFixture>[] = [];
 afterEach(() => { for (const f of fixtures.splice(0)) f.close(); });
 describe('node wrapper against the real in-process API', () => {
@@ -16,18 +16,15 @@ describe('node wrapper against the real in-process API', () => {
     try { await c.payments.get('missing'); throw new Error('Expected API failure'); }
     catch (error) { expect(error).toBeInstanceOf(PactApiError); expect(error).toMatchObject({ status: 404 }); }
   });
-  it('re-exports V2 signing helpers and registers/cancels through the actual V2 API', async () => {
-    const f = apiFixture(true, false, 2, merchantSigner.address); fixtures.push(f);
+  it('re-exports the signing helpers and registers/cancels a subscription through the actual API', async () => {
+    const f = apiFixture(true, false, merchantSigner.address); fixtures.push(f);
     const c = createPactNodeClient({ apiKey: f.keys.secretKey, baseUrl: 'http://sdk.test', fetch: f.fetcher });
-    const plan = await c.subscriptions.createPlan({ name: 'Node V2', amount: '2', periodSeconds: 86400 });
+    const plan = await c.subscriptions.createPlan({ name: 'Node', amount: '2', periodSeconds: 86400 });
     const mandate = v2Mandate(plan.id);
     const deadline = BigInt(Math.floor(Date.now()/1000) + 120);
-    const sub = await c.subscriptions.createV2({
-      planId: plan.id, mandate, signature: await signer.signTypedData(mandateV2TypedData(mandate, subscriptionV2)),
-      merchantConsent: { deadline, signature: await merchantSigner.signTypedData(sponsorshipConsentV2TypedData(mandate, deadline, subscriptionV2)) },
-    });
+    const sub = await c.subscriptions.create({ planId: plan.id, mandate, signature: await signer.signTypedData(mandateTypedData(mandate, subscription)) });
     expect(sub.status).toBe('active');
-    await c.subscriptions.cancelV2(sub.id, { deadline, signature: await signer.signTypedData(cancellationV2TypedData(sub.chainId, deadline, subscriptionV2)) });
+    await c.subscriptions.cancel(sub.id, { deadline, signature: await signer.signTypedData(cancellationTypedData(sub.chainId, deadline, subscription)) });
     expect((await c.subscriptions.list()).data[0].status).toBe('cancelled');
   });
   it('requires explicit endpoint and does not retry ambiguous transport failures', async () => {

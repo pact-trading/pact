@@ -14,7 +14,7 @@ function fixture() {
   const db = openDb(), chain = new FakeChain(true);
   const keys = seedMerchant(db, '0x00000000000000000000000000000000000000aa');
   const wallet = new WalletIdentity(db, { origin: 'http://localhost:3000', allowLocalEmail: true });
-  const app = createApp({ db, chain, wallet, identity: new Identities(wallet), relayer: new Relayer(chain, router, allowedTargets(escrow, subscription)), router, escrow, subscription });
+  const app = createApp({ db, chain, wallet, identity: new Identities(wallet), relayer: new Relayer(chain, router, allowedTargets({ escrow: escrow, subscription: subscription })), router, escrow, subscription });
   const call = async (path: string, token: string, body?: unknown) => {
     const r = await app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     return { status: r.status, body: await r.json() };
@@ -77,7 +77,7 @@ describe('invoices in live mode', () => {
       const offer = (paymentId: string, deadline: number) => f.db.prepare('INSERT OR REPLACE INTO hosted_intent_offers VALUES (?,?)').run(paymentId, deadline);
       const submitted = (paymentId: string, amount: bigint, deadline: number, intentStatus = 'submitted') => {
         const data = encodeFunctionData({ abi: escrowAbi, functionName: 'charge', args: [paymentId as Hex, merchant, amount, 86_400n] });
-        const request = { data, signature: '0x', intent: { signer: payer.address, merchant, target: escrow, dataHash: '0x', amount: amount.toString(), feeUSDT: '0', nonce: String(unix(0)), deadline: String(deadline), maxGas: '1' } };
+        const request = { data, signature: '0x', intent: { signer: payer.address, merchant, target: escrow, dataHash: '0x', amount: amount.toString(), nonce: String(unix(0)), deadline: String(deadline), maxGas: '1' } };
         f.db.prepare('INSERT INTO intents VALUES (?,?,?,?,?,?,?,?,?)').run(`int_${paymentId}`, f.keys.merchantId, payer.address.toLowerCase(), request.intent.nonce, JSON.stringify(request), intentStatus, null, null, new Date().toISOString());
       };
       return { f, token, invoiceId: created.id as string, pay, status, unix, offer, submitted };

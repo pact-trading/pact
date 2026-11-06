@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { keccak256, type Address } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { createSiweMessage } from 'viem/siwe';
-import { APPROVER, ApprovalService } from '../src/approval.js';
+import { ApprovalService } from '../src/approval.js';
 import { runKeeper } from '../src/keeper.js';
 import { Identities } from '../src/identity.js';
 import { WalletIdentity } from '../src/wallet-identity.js';
@@ -11,12 +11,10 @@ import { FakeChain } from '../src/chain.js';
 import { Relayer, allowedTargets } from '../src/relayer.js';
 import { createApp } from '../src/app.js';
 import { priceWithDiscount, renewalDiscountAmount } from '../src/discounts.js';
-import { renewalService } from '../src/renewal-service.js';
-import { KeeperRenewals } from '../src/subscriptions-live.js';
-import { FundedRenewals } from '../src/funded-renewals.js';
 import { IdentityError, type PrivyIdentity } from '../src/identity.js';
 import { Indexer } from '../src/indexer.js';
 import { accountantExport } from '../src/export.js';
+import { KeeperRenewals } from '../src/subscriptions-live.js';
 
 const address = (n: number) => `0x${n.toString(16).padStart(40, '0')}` as Address;
 function fixture() {
@@ -25,7 +23,7 @@ function fixture() {
     if (token !== 'payer') throw new IdentityError('invalid_identity_token', 401);
     return { userId: 'person-1', sessionId: 'session', expiresAt: Math.floor(Date.now() / 1000) + 300, email: 'buyer@example.test', wallet: { address: address(22), id: null } };
   }, async merchantFor() { throw new IdentityError('merchant_not_registered', 403); } } as unknown as PrivyIdentity;
-  const app = createApp({ db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets(address(2), address(3))) });
+  const app = createApp({ db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets({ escrow: address(2), subscription: address(3) })) });
   const request = async (path: string, token: string, body?: unknown, key = 'unique') => {
     const result = await app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: result.status, body: await result.json() as any };
@@ -44,10 +42,8 @@ describe('discounts', () => {
     expect((await f.request('/v1/discounts', f.keys.secretKey)).body.data[0].redemptions).toBe(0);
     expect(() => priceWithDiscount(f.db, f.keys.merchantId, 'missing', 4_000_000n)).toThrowError(/discount_invalid/);
     expect(() => priceWithDiscount(f.db, f.keys.merchantId, 'save', 1_000_000n)).toThrowError(/discount_below_minimum/);
-    expect((await f.discount({ code: 'EXPIRED', expiresAt: '2026-11-06T00:00:00Z' })).status).toBe(201);
-    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-11-07T00:00:00Z'));
+    expect((await f.discount({ code: 'EXPIRED', expiresAt: '2020-01-01T00:00:00Z' })).status).toBe(201);
     expect(() => priceWithDiscount(f.db, f.keys.merchantId, 'EXPIRED', 4_000_000n)).toThrowError(/discount_expired/);
-    vi.useRealTimers();
     await f.discount({ code: 'FIX', kind: 'fixed', value: '1000001', maxRedemptions: 1 });
     expect(priceWithDiscount(f.db, f.keys.merchantId, 'FIX', 3_000_000n).net).toBe(1_999_999n);
     f.db.prepare("UPDATE discounts SET redemptions=1 WHERE code='FIX'").run();
@@ -87,8 +83,6 @@ describe('discounts', () => {
     expect([1, 2, 3].map(n => renewalDiscountAmount(f.db, 'sub', n))).toEqual([4_000_000n, 4_000_000n, 5_000_000n]);
     f.db.prepare("UPDATE subscriptions SET discount_duration='once' WHERE id='sub'").run();
     expect([1, 2].map(n => renewalDiscountAmount(f.db, 'sub', n))).toEqual([4_000_000n, 5_000_000n]);
-    expect(renewalService(f.db, f.chain)).toBeInstanceOf(KeeperRenewals);
-    expect(renewalService(f.db, new FakeChain(false, 2))).toBeInstanceOf(FundedRenewals);
     f.db.close();
   });
   it('prices a payment link on the server and records the code with its payment', async () => {
@@ -106,18 +100,16 @@ describe('discounts', () => {
   });
   it('refuses each invalid code over HTTP without creating or redeeming anything', async () => {
     const f = fixture();
-    await f.discount({ code: 'OLD', expiresAt: '2026-11-06T00:00:00Z' });
+    await f.discount({ code: 'OLD', expiresAt: '2020-01-01T00:00:00Z' });
     await f.discount({ code: 'SOON', startsAt: '2099-01-01T00:00:00Z' });
     await f.discount({ code: 'USED', maxRedemptions: 1 });
     await f.discount({ code: 'ALL', value: '10000' });
     f.db.prepare("UPDATE discounts SET redemptions=1 WHERE code='USED'").run();
     const product = (await f.request('/v1/commerce/products', f.keys.secretKey, { name: 'Widget', description: '', status: 'active', prices: [{ currency: 'USDT', amountMinor: '4000000' }] })).body;
-    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-11-07T00:00:00Z'));
     for (const [code, expected] of [['NOPE', 'discount_invalid'], ['OLD', 'discount_expired'], ['SOON', 'discount_expired'], ['USED', 'discount_exhausted'], ['ALL', 'discount_below_minimum']]) {
       const refused = await f.request('/v1/commerce/checkout-sessions', 'payer', { productId: product.id, rail: 'whitechain', discountCode: code }, `key-${code}`);
       expect(refused.status).toBe(422); expect(refused.body.error.code).toBe(expected);
     }
-    vi.useRealTimers();
     expect(f.db.prepare('SELECT count(*) n FROM commerce_orders').get()).toEqual({ n: 0 });
     expect(f.db.prepare("SELECT sum(redemptions) n FROM discounts").get()).toEqual({ n: 1 });
     const malformed = await f.request('/v1/discounts', f.keys.secretKey, []);
@@ -133,14 +125,14 @@ describe('discounts', () => {
         [{ duration: 'once' }, [4_000_000n, 5_000_000n, 5_000_000n], 0],
         [{ duration: 'forever' }, [4_000_000n, 4_000_000n, 4_000_000n], null],
       ] as const) {
-        const start = new Date('2026-11-06T00:00:00.000Z').getTime(), period = 30 * 86_400_000;
+        const start = new Date('2026-11-05T00:00:00.000Z').getTime(), period = 30 * 86_400_000;
         vi.setSystemTime(start);
         const db = openDb(), chain = new FakeChain(true), merchant = privateKeyToAccount(generatePrivateKey()), customer = privateKeyToAccount(generatePrivateKey());
         const keys = seedMerchant(db, merchant.address.toLowerCase());
         const wallet = new WalletIdentity(db, { origin: 'http://localhost:3000' });
-        const approval = new ApprovalService(db, chain, { enabled: true, delegate: APPROVER, runtimeHash: keccak256('0x60006000'), escrow: address(2), minimumAmount: 1_000_000n, confirmations: 1n });
+        const approval = new ApprovalService(db, chain, { enabled: true, escrow: address(2), minimumAmount: 1_000_000n, confirmations: 1n });
         const renewals = new KeeperRenewals(db, chain);
-        const app = createApp({ db, chain, relayer: new Relayer(chain, address(1), allowedTargets(address(2), address(3))), approval, renewals, wallet, identity: new Identities(wallet), router: address(1), escrow: address(2), subscription: address(3) });
+        const app = createApp({ db, chain, relayer: new Relayer(chain, address(1), allowedTargets({ escrow: address(2), subscription: address(3) })), approval, renewals, wallet, identity: new Identities(wallet), router: address(1), escrow: address(2), subscription: address(3) });
         const call = async (path: string, token: string, body?: unknown) => {
           const r = await app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
           return { status: r.status, body: await r.json() as any };

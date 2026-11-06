@@ -8,7 +8,7 @@ import { createApp } from '../src/app.js';
 import { Relayer, allowedTargets } from '../src/relayer.js';
 import { Identities } from '../src/identity.js';
 import { WalletIdentity } from '../src/wallet-identity.js';
-import { APPROVER, ApprovalService } from '../src/approval.js';
+import { ApprovalService } from '../src/approval.js';
 import { runKeeper } from '../src/keeper.js';
 import { Indexer } from '../src/indexer.js';
 import { encodeFunctionData } from 'viem';
@@ -24,8 +24,8 @@ async function fixture() {
   const db = openDb(), chain = new FakeChain(true);
   const keys = seedMerchant(db, merchant.address.toLowerCase());
   const wallet = new WalletIdentity(db, { origin: 'http://localhost:3000' });
-  const relayer = new Relayer(chain, router, allowedTargets(escrow, subscription));
-  const approval = new ApprovalService(db, chain, { enabled: true, delegate: APPROVER, runtimeHash: keccak256(runtime), escrow, minimumAmount: 1_000_000n, confirmations: 1n });
+  const relayer = new Relayer(chain, router, allowedTargets({ escrow: escrow, subscription: subscription }));
+  const approval = new ApprovalService(db, chain, { enabled: true, escrow, minimumAmount: 1_000_000n, confirmations: 1n });
   const renewals = new KeeperRenewals(db, chain);
   const app = createApp({ db, chain, relayer, approval, renewals, wallet, identity: new Identities(wallet), router, escrow, subscription });
   const call = async (path: string, token: string, body?: unknown) => {
@@ -41,7 +41,7 @@ async function fixture() {
 }
 
 
-const start = new Date('2026-11-06T00:00:00.000Z');
+const start = new Date('2026-11-05T00:00:00.000Z');
 const DAY = 86_400_000;
 afterEach(() => vi.useRealTimers());
 async function trialFixture(days = 14) {
@@ -117,7 +117,9 @@ describe('free trials', () => {
   it('lets the payer cancel a trial and never charges it afterwards', async () => {
     const f = await trialFixture(), renew = vi.spyOn(f.chain, 'renew');
     const ready = (await f.call(`/v1/commerce/me/subscriptions/${f.created.id}/cancel-intent`, f.token, {})).body;
-    const result = await f.call(`/v1/commerce/me/subscriptions/${f.created.id}/cancel`, f.token, { intent: ready.intent, data: ready.data, signature: await f.signIntent(ready) });
+    // The payer signs a Cancel message; Pact's relayer submits it, so the payer needs no gas.
+    const signature = await f.customer.signTypedData({ domain: { ...ready.typedData.domain, chainId: Number(ready.typedData.domain.chainId) }, types: { Cancel: ready.typedData.types.Cancel }, primaryType: 'Cancel', message: { id: ready.typedData.message.id, deadline: BigInt(ready.typedData.message.deadline) } });
+    const result = await f.call(`/v1/commerce/me/subscriptions/${f.created.id}/cancel`, f.token, { deadline: ready.deadline, signature });
     expect(result.status).toBe(200); expect((await f.detail()).status).toBe('cancelled');
     vi.setSystemTime(start.getTime() + 20 * DAY);
     await runKeeper(f.db, f.chain, new Date(), f.renewals); expect(renew).not.toHaveBeenCalled();
@@ -143,7 +145,7 @@ describe('free trials', () => {
     const f = await trialFixture();
     if (state === 'cancelled') await f.call(`/v1/subscriptions/${f.created.id}/cancel`, f.keys.secretKey, { by: 'merchant' });
     const data = encodeFunctionData({ abi: subscriptionAbi, functionName: 'charge', args: [f.created.chainId, 5_000_000n] });
-    const intent = { signer: merchant.address, merchant: merchant.address, target: subscription as Hex, dataHash: keccak256(data), amount: 5_000_000n, feeUSDT: 10_000n, nonce: 12345n, deadline: BigInt(Math.floor(Date.now()/1000)+300), maxGas: 400_000 };
+    const intent = { signer: merchant.address, merchant: merchant.address, target: subscription as Hex, dataHash: keccak256(data), amount: 5_000_000n, nonce: 12345n, deadline: BigInt(Math.floor(Date.now()/1000)+300), maxGas: 400_000 };
     const signature = await merchant.signTypedData(intentTypedData(intent, router));
     const r = await f.call('/v1/intents', f.keys.secretKey, { intent, data, signature });
     expect(r.body.error.code).toBe(state === 'trial' ? 'too_early' : 'cancelled');
@@ -159,7 +161,7 @@ describe('free trials', () => {
   it('makes a pending generic charge visible to merchant cancellation', async () => {
     const f = await trialFixture(0);
     const data = encodeFunctionData({ abi: subscriptionAbi, functionName: 'charge', args: [f.created.chainId, 5_000_000n] });
-    const intent = { signer: merchant.address, merchant: merchant.address, target: subscription as Hex, dataHash: keccak256(data), amount: 5_000_000n, feeUSDT: 10_000n, nonce: 12345n, deadline: BigInt(Math.floor(Date.now()/1000)+300), maxGas: 400_000 };
+    const intent = { signer: merchant.address, merchant: merchant.address, target: subscription as Hex, dataHash: keccak256(data), amount: 5_000_000n, nonce: 12345n, deadline: BigInt(Math.floor(Date.now()/1000)+300), maxGas: 400_000 };
     const signature = await merchant.signTypedData(intentTypedData(intent, router));
     let release!: () => void, entered!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });

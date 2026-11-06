@@ -12,7 +12,7 @@ const origin = 'http://localhost:3000';
 function fixture(options: { allowLocalEmail?: boolean } = {}) {
   const db = openDb(), chain = new FakeChain(true);
   const wallet = new WalletIdentity(db, { origin, ...options });
-  const app = createApp({ db, chain, wallet, identity: new Identities(wallet), relayer: new Relayer(chain, '0x0000000000000000000000000000000000000001', allowedTargets('0x0000000000000000000000000000000000000002', '0x0000000000000000000000000000000000000003')) });
+  const app = createApp({ db, chain, wallet, identity: new Identities(wallet), relayer: new Relayer(chain, '0x0000000000000000000000000000000000000001', allowedTargets({ escrow: '0x0000000000000000000000000000000000000002', subscription: '0x0000000000000000000000000000000000000003' })) });
   const call = (path: string, { token, body, method }: { token?: string; body?: unknown; method?: string } = {}) =>
     app.request(path, { method: method ?? (body === undefined ? 'GET' : 'POST'), headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
   async function message(account: PrivateKeyAccount, overrides: Partial<Parameters<typeof createSiweMessage>[0]> = {}) {

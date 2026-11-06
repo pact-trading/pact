@@ -74,7 +74,7 @@ describe('merchant store proxy route', () => {
   });
   it('works against the real API route with a real secret key', async () => {
     const db = openDb(), chain = new FakeChain(true), keys = seedMerchant(db, `0x${'b'.repeat(40)}`);
-    const app = createApp({ db, chain, relayer: new Relayer(chain, `0x${'1'.repeat(40)}` as Address, allowedTargets(`0x${'2'.repeat(40)}` as Address, `0x${'3'.repeat(40)}` as Address)) });
+    const app = createApp({ db, chain, relayer: new Relayer(chain, `0x${'1'.repeat(40)}` as Address, allowedTargets({ escrow: `0x${'2'.repeat(40)}` as Address, subscription: `0x${'3'.repeat(40)}` as Address })) });
     const response = await forward(post({ amount: STORE_ITEM.amount, email: 'ana@example.test' }), ['v1', 'payments'], { PACT_SECRET_KEY: keys.secretKey, PACT_API_URL: 'http://api.test' }, ((url: string, init: RequestInit) => app.request(new URL(url).pathname, init)) as unknown as typeof fetch);
     expect(response.status).toBe(200);
     const created = await response.json() as { id: string; checkoutUrl: string };
@@ -116,7 +116,7 @@ describe('hosted page for a plain payment', () => {
     const db = openDb(), chain = new FakeChain(true), keys = seedMerchant(db, address(11));
     const users: Record<string, object> = { ana: { userId: 'ana', email: 'ana@example.test', sessionId: 's', expiresAt: 9e9, wallet: { address: address(22), id: null } }, eve: { userId: 'eve', email: 'eve@example.test', sessionId: 's', expiresAt: 9e9, wallet: { address: address(33), id: null } } };
     const identity = { handles: () => true, async authenticate(token: string) { if (!users[token]) throw new IdentityError('invalid_identity_token', 401); return users[token]; }, async merchantFor() { throw new IdentityError('merchant_not_registered', 403); } } as unknown as PrivyIdentity;
-    const app = createApp({ db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets(address(2), address(3))) });
+    const app = createApp({ db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets({ escrow: address(2), subscription: address(3) })) });
     const call = async (path: string, token: string, body?: unknown) => { const r = await app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: r.status, body: await r.json() as any }; };
     return { db, keys, call };
   }

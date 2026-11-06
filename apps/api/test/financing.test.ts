@@ -1,11 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { decodeFunctionData, encodeFunctionData, erc20Abi, hexToString, keccak256, stringToHex, type Address, type Hex } from 'viem';
+import { describe, expect, it, vi } from 'vitest';
+import { decodeFunctionData, encodeFunctionData, hexToString, keccak256, stringToHex, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { openDb, seedMerchant, now } from '../src/db.js';
 import { FakeChain, escrowAbi } from '../src/chain.js';
 import { Relayer, allowedTargets } from '../src/relayer.js';
 import { createApp } from '../src/app.js';
-import { ApprovalService, APPROVER } from '../src/approval.js';
+import { ApprovalService } from '../src/approval.js';
 import { IdentityError, type PrivyIdentity } from '../src/identity.js';
 import { intentTypedData } from '../src/typed-data.js';
 import { receivablesAbi } from '../src/financing/chain.js';
@@ -18,7 +18,7 @@ const hash = (n: number) => `0x${n.toString(16).padStart(64, '0')}` as Hex;
 const router = '0x0000000000000000000000000000000000000001' as Address;
 const escrow = '0x0000000000000000000000000000000000000002' as Address;
 const subscription = '0x0000000000000000000000000000000000000003' as Address;
-const merchant = privateKeyToAccount(hash(11)).address;
+const merchantAccount = privateKeyToAccount(hash(11)), merchant = merchantAccount.address;
 const payer = privateKeyToAccount(hash(22));
 const wallets = { payer: payer.address, alice: privateKeyToAccount(hash(33)).address, bob: privateKeyToAccount(hash(44)).address, officer: privateKeyToAccount(hash(55)).address } as const;
 const USDT = 1_000_000n;
@@ -38,9 +38,9 @@ function fixture() {
   } as unknown as PrivyIdentity;
   chain.approval.state.balance = 5_000n * USDT;
   chain.approval.state.allowance = 5_000n * USDT;
-  const approval = new ApprovalService(db, chain, { enabled: true, delegate: APPROVER, runtimeHash: keccak256(chain.approval.state.runtime), escrow, minimumAmount: USDT });
+  const approval = new ApprovalService(db, chain, { enabled: true, escrow, minimumAmount: USDT });
   const financing = new FinancingService(db, fin, { baseUrl: 'http://localhost:3000', escrow, clockCacheMs: 0, confirmations: 0n });
-  const app = createApp({ db, chain, identity, approval, financing, relayer: new Relayer(chain, router, allowedTargets(escrow, subscription, 1, RECEIVABLES)), router, escrow, subscription });
+  const app = createApp({ db, chain, identity, approval, financing, relayer: new Relayer(chain, router, allowedTargets({ escrow: escrow, subscription: subscription, receivables: RECEIVABLES })), router, escrow, subscription });
   const call = async (path: string, token: string, body?: unknown) => {
     const r = await app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body !== undefined ? { body: json(body) } : {}) });
     return { status: r.status, body: await r.json() };
@@ -57,22 +57,31 @@ function fixture() {
     db.prepare("UPDATE invoices SET status='acknowledged' WHERE id=?").run(created.id);
     return created as { id: string; amount: string; dueAt: string };
   };
-  /** The merchant's wallet lists the invoice: the contract's Listed event, then the API applies it. */
+  /** The merchant signs the listing and Pact relays it: the contract's Listed event, then the API applies it. */
   const discounts = new Map<string, number>(), sold = new Map<string, bigint>();
+  let nextClaim = 0n;
+  type ListOrder = { merchant: Address; invoiceId: string; debtor: Address; face: bigint; maturity: bigint; discountBps: number; deadline: bigint };
   const list = async (invoiceId: string, claimId: bigint) => {
     const prepared = await ok(`/v1/financing/invoices/${invoiceId}/list`, keys.secretKey, {});
-    const args = decodeFunctionData({ abi: receivablesAbi, data: prepared.transactions[0].data }).args as readonly [string, Address, bigint, bigint, number, Hex];
-    const ref = keccak256(stringToHex(args[0]));
-    const ack = (db.prepare('SELECT typed_hash FROM invoice_acknowledgements WHERE invoice_id=?').get(invoiceId) as { typed_hash: Hex }).typed_hash;
-    const tx = fin.transaction(merchant, RECEIVABLES, [{ name: 'Listed', args: { claimId, merchant, invoiceRef: ref, face: args[2], maturity: args[3], discountBps: args[4], ackHash: ack, debtor: args[1] } }]);
-    fin.active.set(`${merchant.toLowerCase()}:${ref.toLowerCase()}`, claimId);
-    fin.claims.set(claimId.toString(), { merchant, maturity: args[3], status: 'listed', face: args[2], sold: 0n, collected: 0n, reserve: 0n });
-    discounts.set(claimId.toString(), args[4]);
-    return { view: await ok(`/v1/financing/invoices/${invoiceId}/transactions`, keys.secretKey, { hashes: [tx] }), prepared, args, maturity: Number(args[3]), discountBps: args[4] };
+    nextClaim = claimId;
+    const view = await ok(`/v1/financing/invoices/${invoiceId}/list/relay`, keys.secretKey, { order: prepared.order, signatures: [sig] });
+    const call = fin.relayed.at(-1)!;
+    const order = call.args[0] as ListOrder;
+    return { view, prepared, call, maturity: Number(order.maturity), discountBps: order.discountBps };
   };
-  // What the contracts do with a relayed signed order (the fake does not run them): approve in the
-  // registry, sell units. Tests override this for other outcomes.
-  const relays = ({ functionName, args }: { functionName: string; args: readonly unknown[] }) => {
+  // What the contracts do with a relayed signed order (the fake does not run them): list, approve in
+  // the registry, sell units. Tests override this for other outcomes.
+  const relays = ({ contract, functionName, args }: { contract: string; functionName: string; args: readonly unknown[] }) => {
+    if (contract === 'usdt' && functionName === 'permit') return [];
+    if (functionName === 'listWithSig') {
+      const o = args[0] as ListOrder;
+      const ref = keccak256(stringToHex(o.invoiceId));
+      const ack = (db.prepare('SELECT typed_hash FROM invoice_acknowledgements WHERE invoice_id=?').get(o.invoiceId) as { typed_hash: Hex }).typed_hash;
+      fin.active.set(`${merchant.toLowerCase()}:${ref.toLowerCase()}`, nextClaim);
+      fin.claims.set(nextClaim.toString(), { merchant, maturity: o.maturity, status: 'listed', face: o.face, sold: 0n, collected: 0n, reserve: 0n });
+      discounts.set(nextClaim.toString(), o.discountBps);
+      return [{ name: 'Listed', args: { claimId: nextClaim, merchant, invoiceRef: ref, face: o.face, maturity: o.maturity, discountBps: o.discountBps, ackHash: ack, debtor: o.debtor } }];
+    }
     if (functionName === 'decideWithSig') {
       const d = args[0] as { officer: Address; investor: Address; approve: boolean; expiresAt: bigint; region: Hex };
       if (!fin.officers.has(d.officer.toLowerCase())) return 'NotOfficer';
@@ -108,7 +117,7 @@ function fixture() {
     const prepared = await ok(`/v1/investor/listings/${invoiceId}/purchase`, who, { faceMinor: units.toString() });
     return { prepared, view: await ok(`/v1/investor/listings/${invoiceId}/purchase/relay`, who, { order: prepared.order, signatures: prepared.typedData.map(() => sig) }) };
   };
-  return { db, chain, fin, financing, keys, call, ok, invoice, list, approve, buy };
+  return { db, chain, fin, financing, keys, call, ok, invoice, list, approve, buy, sig };
 }
 
 describe('invoice financing API', () => {
@@ -120,13 +129,16 @@ describe('invoice financing API', () => {
     expect(overview.invoices).toHaveLength(1);
     expect(overview.invoices[0]).toMatchObject({ status: 'eligible', terms: { faceMinor: '1000000000', discountBps: 300, priceMinor: '970000000', upfrontMinor: '865000000' } });
 
-    const { view: listed, prepared, discountBps } = await f.list(inv.id, 1n);
-    expect(prepared.transactions[0].to).toBe(RECEIVABLES);
-    const listArgs = decodeFunctionData({ abi: receivablesAbi, data: prepared.transactions[0].data });
-    expect(listArgs.functionName).toBe('list');
+    const { view: listed, prepared, call, discountBps } = await f.list(inv.id, 1n);
+    // The merchant only signs: Pact relays the listing, so the merchant needs no WBT.
+    expect(prepared.typedData[0]).toMatchObject({ primaryType: 'List', domain: { name: 'Pact Receivables', verifyingContract: RECEIVABLES }, message: { merchant: merchant.toLowerCase(), invoiceId: inv.id, nonce: '0' } });
+    expect(prepared.lines).toContainEqual({ label: 'Gas', value: 'Paid by Pact: you only sign' });
+    expect(call).toMatchObject({ contract: 'receivables', functionName: 'listWithSig' });
     // The contract gets the invoice id, the debtor and the customer's signature, and checks them itself.
-    expect(listArgs.args![0]).toBe(inv.id);
-    expect(String(listArgs.args![1]).toLowerCase()).toBe(payer.address.toLowerCase());
+    const order = call.args[0] as { invoiceId: string; debtor: Address };
+    expect(order.invoiceId).toBe(inv.id);
+    expect(order.debtor.toLowerCase()).toBe(payer.address.toLowerCase());
+    expect(call.args[1]).toBe('0x');
     expect(f.db.prepare('SELECT invoice_id FROM fin_claims WHERE id=?').get('1')).toEqual({ invoice_id: inv.id });
     expect(invoiceRef(inv.id)).toBe(keccak256(stringToHex(inv.id)));
     expect(listed).toMatchObject({ status: 'requested', funding: { open: true, soldMinor: '0' } });
@@ -190,14 +202,14 @@ describe('invoice financing API', () => {
     expect(decodeFunctionData({ abi: receivablesAbi, data: offer.data }).args).toEqual([1n, started.paymentId, 1_000n * USDT]);
 
     // The escrow is refused for a financed invoice, even with a valid signature.
-    const escrowData = encodeFunctionData({ abi: escrowAbi, functionName: 'charge', args: [started.paymentId, merchant, 1_000n * USDT, 2_592_000n] });
+    const escrowData = encodeFunctionData({ abi: escrowAbi, functionName: 'chargeInvoice', args: [started.paymentId, merchant, 1_000n * USDT, 2_592_000n] });
     const escrowIntent = { ...offer.intent, target: escrow, dataHash: keccak256(escrowData), nonce: '7' };
-    const escrowSignature = await payer.signTypedData(intentTypedData({ ...escrowIntent, amount: BigInt(escrowIntent.amount), feeUSDT: BigInt(escrowIntent.feeUSDT), nonce: 7n, deadline: BigInt(escrowIntent.deadline) }, router) as never);
+    const escrowSignature = await payer.signTypedData(intentTypedData({ ...escrowIntent, amount: BigInt(escrowIntent.amount), nonce: 7n, deadline: BigInt(escrowIntent.deadline) }, router) as never);
     const toEscrow = await f.call(`/v1/commerce/me/payments/${started.paymentId}/intent`, 'payer', { intent: escrowIntent, data: escrowData, signature: escrowSignature });
     expect(toEscrow.status).toBe(422);
     expect(toEscrow.body.error.code).toBe('invoice_financed');
 
-    const intent = { ...offer.intent, amount: BigInt(offer.intent.amount), feeUSDT: BigInt(offer.intent.feeUSDT), nonce: BigInt(offer.intent.nonce), deadline: BigInt(offer.intent.deadline) };
+    const intent = { ...offer.intent, amount: BigInt(offer.intent.amount), nonce: BigInt(offer.intent.nonce), deadline: BigInt(offer.intent.deadline) };
     const signature = await payer.signTypedData(intentTypedData(intent, router) as never);
     const submitted = await f.ok(`/v1/commerce/me/payments/${started.paymentId}/intent`, 'payer', { intent: offer.intent, data: offer.data, signature });
     expect(submitted.status).toBe('submitted');
@@ -253,18 +265,31 @@ describe('invoice financing API', () => {
     f.fin.balances.set(merchant.toLowerCase(), 100n * USDT);
     expect((await f.call(`/v1/financing/invoices/${inv.id}/buy-back`, f.keys.secretKey, {})).body.error.code).toBe('insufficient_funds');
     f.fin.balances.set(merchant.toLowerCase(), 1_000n * USDT);
+    // The merchant signs USDT permits for the holders' money and the network fee, then the buy-back
+    // as a Router intent: it pays the gas in USDT on top, like a refund, and needs no WBT.
     const buyBack = await f.ok(`/v1/financing/invoices/${inv.id}/buy-back`, f.keys.secretKey, {});
-    expect(buyBack.transactions.map((t: { data: Hex }) => t.data.slice(0, 10))).toEqual([
-      encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [RECEIVABLES, 182n * USDT] }).slice(0, 10),
-      encodeFunctionData({ abi: receivablesAbi, functionName: 'buyBack', args: [1n] }).slice(0, 10),
-    ]);
-    const tx = f.fin.transaction(merchant, RECEIVABLES, [
-      { name: 'HolderPaid', args: { claimId: 1n, holder: wallets.alice, amount: 182n * USDT, source: 2 } },
-      { name: 'BoughtBack', args: { claimId: 1n, amount: 182n * USDT } },
-    ]);
-    // Someone else's transaction cannot be submitted as the merchant's.
-    expect((await f.call(`/v1/investor/listings/${inv.id}/transactions`, 'alice', { hashes: [tx] })).body.error.code).toBe('transaction_sender_mismatch');
-    const bought = await f.ok(`/v1/financing/invoices/${inv.id}/transactions`, f.keys.secretKey, { hashes: [tx] });
+    expect(buyBack.typedData.map((t: { primaryType: string }) => t.primaryType)).toEqual(['Permit', 'Permit', 'Intent']);
+    expect(buyBack.typedData.slice(0, 2).map((t: { message: { spender: string } }) => t.message.spender)).toEqual([RECEIVABLES, router]);
+    expect(buyBack.order).toMatchObject({ claimId: '1', owed: '182000000', permits: 'receivables,router' });
+    expect(buyBack.lines.find((l: { label: string }) => l.label === 'Network fee').value).toMatch(/^Up to \$\d/);
+    const data = encodeFunctionData({ abi: receivablesAbi, functionName: 'buyBack', args: [1n] });
+    const intent = { signer: merchant, merchant, target: RECEIVABLES, dataHash: keccak256(data), amount: 182n * USDT, nonce: BigInt(buyBack.order.nonce), deadline: BigInt(buyBack.order.deadline), maxGas: Number(buyBack.order.maxGas) };
+    // Only the merchant's own signature moves its money.
+    const forged = await payer.signTypedData(intentTypedData(intent, router) as never);
+    expect((await f.call(`/v1/financing/invoices/${inv.id}/buy-back/relay`, f.keys.secretKey, { order: buyBack.order, signatures: [f.sig, f.sig, forged] })).body.error.code).toBe('invalid_signature');
+    // The Router transaction lands on the same chain the financing indexer reads.
+    const broadcast = f.chain.broadcastTransaction.bind(f.chain);
+    vi.spyOn(f.chain, 'broadcastTransaction').mockImplementation(async raw => {
+      const hash = await broadcast(raw);
+      f.fin.adopt(hash, router, [
+        { name: 'HolderPaid', args: { claimId: 1n, holder: wallets.alice, amount: 182n * USDT, source: 2 } },
+        { name: 'BoughtBack', args: { claimId: 1n, amount: 182n * USDT } },
+      ]);
+      return hash;
+    });
+    const signature = await merchantAccount.signTypedData(intentTypedData(intent, router) as never);
+    const bought = await f.ok(`/v1/financing/invoices/${inv.id}/buy-back/relay`, f.keys.secretKey, { order: buyBack.order, signatures: [f.sig, f.sig, signature] });
+    expect(f.fin.relayed.filter(r => r.contract === 'usdt').map(r => String(r.args[1]).toLowerCase())).toEqual([RECEIVABLES, router]);
     expect(bought).toMatchObject({ status: 'bought_back', receivedMinor: '202000000', buyBackMinor: '0' });
     expect(bought.ledger.map((r: { type: string }) => r.type)).toContain('Financing buy-back');
     f.fin.active.clear();
@@ -365,6 +390,7 @@ describe('invoice financing API', () => {
     // An investor cancels the orders it signed that did not run: one signature, relayed by Pact.
     f.fin.nonces.set(`receivables:${wallets.alice.toLowerCase()}`, 2n);
     f.fin.onRelay = ({ contract, functionName, args }) => {
+      if (contract === 'usdt') return 'reverted';
       if (functionName !== 'cancelNonceWithSig') return 'reverted';
       const key = `${contract}:${String(args[0]).toLowerCase()}`;
       const nonce = f.fin.nonces.get(key) ?? 0n;
@@ -390,13 +416,58 @@ describe('invoice financing API', () => {
   it('says financing is unavailable where the contracts are not deployed', async () => {
     const db = openDb(), chain = new FakeChain();
     const keys = seedMerchant(db, merchant);
-    const app = createApp({ db, chain, relayer: new Relayer(chain, router, allowedTargets(escrow, subscription)), router, escrow, subscription });
+    const app = createApp({ db, chain, relayer: new Relayer(chain, router, allowedTargets({ escrow: escrow, subscription: subscription })), router, escrow, subscription });
     for (const path of ['/v1/financing', '/v1/financing/invoices/inv_1', '/v1/investor/marketplace', '/v1/compliance/registry']) {
       const r = await app.request(path, { headers: { authorization: `Bearer ${keys.secretKey}` } });
       expect(r.status).toBe(501);
       expect((await r.json()).error.code).toBe('financing_unavailable');
     }
     expect((await (await app.request('/v1/network')).json()).contracts).toMatchObject({ receivables: null, investorRegistry: null });
+  });
+
+  it('takes a listing down with the merchant’s signature, and lets any wallet withdraw a credit by signing', async () => {
+    const f = fixture();
+    const inv = await f.invoice('500', 30);
+    await f.list(inv.id, 4n);
+    // Cancelling is signed (EIP-712 CancelListing) and relayed: the merchant needs no WBT.
+    f.fin.nonces.set(`receivables:${merchant.toLowerCase()}`, 1n);
+    const prepared = await f.ok(`/v1/financing/invoices/${inv.id}/cancel`, f.keys.secretKey, {});
+    expect(prepared.typedData[0]).toMatchObject({ primaryType: 'CancelListing', domain: { name: 'Pact Receivables', verifyingContract: RECEIVABLES }, message: { merchant: merchant.toLowerCase(), claimId: '4', nonce: '1' } });
+    expect((await f.call(`/v1/financing/invoices/${inv.id}/cancel/relay`, f.keys.secretKey, { order: { ...prepared.order, claimId: '5' }, signatures: [f.sig] })).body.error.code).toBe('order_mismatch');
+    f.fin.onRelay = ({ functionName, args }) => functionName === 'cancelWithSig' ? [{ name: 'Cancelled', args: { claimId: args[1] as bigint } }] : 'reverted';
+    const cancelled = await f.ok(`/v1/financing/invoices/${inv.id}/cancel/relay`, f.keys.secretKey, { order: prepared.order, signatures: [f.sig] });
+    expect(f.fin.relayed.at(-1)).toMatchObject({ contract: 'receivables', functionName: 'cancelWithSig', args: [merchant, 4n, BigInt(prepared.order.deadline), f.sig] });
+    expect(f.db.prepare('SELECT status FROM fin_claims WHERE id=?').get('4')).toEqual({ status: 'cancelled' });
+    // Off the marketplace: the invoice can be listed again.
+    expect(cancelled.status).toBe('eligible');
+
+    // A credit the contract could not deliver: its owner signs a Withdraw, Pact relays it.
+    expect((await f.call('/v1/financing/withdraw', 'alice', {})).body.error.code).toBe('nothing_to_withdraw');
+    f.fin.credits.set(wallets.alice.toLowerCase(), 12n * USDT);
+    const withdraw = await f.ok('/v1/financing/withdraw', 'alice', {});
+    expect(withdraw.typedData[0]).toMatchObject({ primaryType: 'Withdraw', message: { account: wallets.alice.toLowerCase(), nonce: '0' } });
+    expect(withdraw.order).toMatchObject({ amount: '12000000' });
+    f.fin.onRelay = ({ functionName, args }) => {
+      if (functionName !== 'withdrawWithSig') return 'reverted';
+      f.fin.credits.delete(String(args[0]).toLowerCase());
+      return [{ name: 'Withdrawal', args: { account: args[0] as Address, amount: 12n * USDT } }];
+    };
+    expect(await f.ok('/v1/financing/withdraw/relay', 'alice', { order: withdraw.order, signatures: [f.sig] })).toEqual({ address: wallets.alice.toLowerCase(), claimableMinor: '0' });
+    expect(f.fin.relayed.at(-1)).toMatchObject({ functionName: 'withdrawWithSig' });
+  });
+
+  it('charges a merchant’s relayed listings to its daily sponsorship budget', async () => {
+    const f = fixture();
+    const inv = await f.invoice('300', 30);
+    // Listing is free for the merchant, but counts against the gas Pact absorbs for it each day.
+    f.db.prepare("INSERT INTO sponsored_spend VALUES ('earlier',?,?,?,'subscribe',?)").run(f.keys.merchantId, new Date().toISOString().slice(0, 10), (10n ** 18n).toString(), new Date().toISOString());
+    const prepared = await f.ok(`/v1/financing/invoices/${inv.id}/list`, f.keys.secretKey, {});
+    const refused = await f.call(`/v1/financing/invoices/${inv.id}/list/relay`, f.keys.secretKey, { order: prepared.order, signatures: [f.sig] });
+    expect(refused.body.error.code).toBe('sponsorship_budget');
+    expect(f.fin.relayed).toHaveLength(0);
+    f.db.prepare("DELETE FROM sponsored_spend WHERE operation_id='earlier'").run();
+    await f.list(inv.id, 7n);
+    expect(f.db.prepare("SELECT kind FROM sponsored_spend WHERE merchant_id=?").all(f.keys.merchantId)).toEqual([{ kind: 'financing_list' }]);
   });
 
   it('refuses ineligible invoices with the reason', async () => {

@@ -7,16 +7,16 @@ import { intentTypedData } from '../src/typed-data.js';
 import type { IntentRequest } from '../src/types.js';
 const key = `0x${'1'.repeat(64)}` as Hex;
 const signer = privateKeyToAccount(key);
-const addresses = { router: '0x0000000000000000000000000000000000000001', escrow: '0x0000000000000000000000000000000000000002', subscription: '0x0000000000000000000000000000000000000003', gasTank: '0x0000000000000000000000000000000000000004' } as const;
+const addresses = { router: '0x0000000000000000000000000000000000000001', escrow: '0x0000000000000000000000000000000000000002', subscription: '0x0000000000000000000000000000000000000003', fees: '0x0000000000000000000000000000000000000004' } as const;
 async function request(nonce = 1n, maxGas = 400_000): Promise<IntentRequest> {
   const data = encodeFunctionData({ abi: escrowAbi, functionName: 'charge', args: [`0x${'a'.repeat(64)}`, signer.address, 1_000_000n, 86400n] });
-  const intent = { signer: signer.address, merchant: signer.address, target: addresses.escrow, dataHash: keccak256(data), amount: 1_000_000n, feeUSDT: 10_000n, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas };
+  const intent = { signer: signer.address, merchant: signer.address, target: addresses.escrow, dataHash: keccak256(data), amount: 1_000_000n, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas };
   return { intent, data, signature: await signer.signTypedData(intentTypedData(intent, addresses.router)) };
 }
 function fixture(maxSpendPerMinute = 10n ** 16n) {
   const chain = new FakeChain();
-  chain.tank.set(signer.address.toLowerCase(), { balanceWei: 10n ** 18n, dailyCapWei: 10n ** 18n, spentTodayWei: 0n });
-  const relayer = new Relayer(chain, addresses.router, allowedTargets(addresses.escrow, addresses.subscription), { minAmount: 1_000_000n, maxGas: 1_000_000n, maxGasPrice: 100_000_000_000n, maxSpendPerMinute });
+  chain.accepted.set(String(signer.address.toLowerCase()).toLowerCase(), 1);
+  const relayer = new Relayer(chain, addresses.router, allowedTargets({ escrow: addresses.escrow, subscription: addresses.subscription }), { minAmount: 1_000_000n, maxGas: 1_000_000n, maxGasPrice: 100_000_000_000n, maxSpendPerMinute });
   return { chain, relayer };
 }
 describe('Router transaction gas', () => {
@@ -86,10 +86,14 @@ describe('Viem exact transaction simulation', () => {
     await expect(relayer.submit(value)).rejects.toMatchObject({ code: 'relayer_pending' });
     expect(chain.sent).toHaveLength(0);
   });
-  it('reserves enough tank funds for Router work, not just target work', async () => {
+  it('checks that the fee covers the whole transaction gas, Router overhead included, not just the target', async () => {
     const { chain, relayer } = fixture();
-    chain.tank.set(signer.address.toLowerCase(), { balanceWei: 500_000n * chain.price, dailyCapWei: 10n ** 18n, spentTodayWei: 0n });
-    await expect(relayer.submit(await request())).rejects.toMatchObject({ code: 'tank_limit' });
+    const value = await request();
+    // A WBT price at which the 0.15 USDT fee covers the 400,000 target gas, but not the full transaction.
+    const gas = transactionGas(value), usdtPerWbt = 130_000n * 10n ** 9n / gas;
+    expect(400_000n * usdtPerWbt * chain.price / 10n ** 18n * 12n).toBeLessThan(150_000n * 10n);
+    chain.policy.usdtPerWbt = usdtPerWbt;
+    await expect(relayer.submit(value)).rejects.toMatchObject({ code: 'fee_below_gas' });
     expect(chain.sent).toHaveLength(0);
   });
 });
@@ -97,13 +101,13 @@ describe('per-merchant sponsorship limits', () => {
   const merchants = { a: '0x00000000000000000000000000000000000000aa', b: '0x00000000000000000000000000000000000000bb' } as const;
   async function requestFor(merchant: Hex, nonce: bigint): Promise<IntentRequest> {
     const data = encodeFunctionData({ abi: escrowAbi, functionName: 'charge', args: [`0x${nonce.toString(16).padStart(64, '0')}`, merchant, 1_000_000n, 86400n] });
-    const intent = { signer: signer.address, merchant, target: addresses.escrow, dataHash: keccak256(data), amount: 1_000_000n, feeUSDT: 10_000n, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas: 400_000 };
+    const intent = { signer: signer.address, merchant, target: addresses.escrow, dataHash: keccak256(data), amount: 1_000_000n, nonce, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600), maxGas: 400_000 };
     return { intent, data, signature: await signer.signTypedData(intentTypedData(intent, addresses.router)) };
   }
   function twoMerchants(limits: Partial<{ maxSpendPerMinute: bigint; maxSpendPerMerchantPerMinute: bigint }> = {}) {
     const chain = new FakeChain();
-    for (const m of Object.values(merchants)) chain.tank.set(m, { balanceWei: 10n ** 18n, dailyCapWei: 10n ** 18n, spentTodayWei: 0n });
-    const relayer = new Relayer(chain, addresses.router, allowedTargets(addresses.escrow, addresses.subscription), { minAmount: 1_000_000n, maxGas: 1_000_000n, maxGasPrice: 100_000_000_000n, maxSpendPerMinute: 10n ** 17n, ...limits });
+    for (const m of Object.values(merchants)) chain.accepted.set(m.toLowerCase(), 1);
+    const relayer = new Relayer(chain, addresses.router, allowedTargets({ escrow: addresses.escrow, subscription: addresses.subscription }), { minAmount: 1_000_000n, maxGas: 1_000_000n, maxGasPrice: 100_000_000_000n, maxSpendPerMinute: 10n ** 17n, ...limits });
     const refusals: string[] = [];
     relayer.onRefusal = (r, refusal) => refusals.push(`${r.intent.merchant}:${refusal.code}`);
     return { chain, relayer, refusals };

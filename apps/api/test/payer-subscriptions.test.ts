@@ -8,20 +8,19 @@ import { createApp } from '../src/app.js';
 import { Relayer, allowedTargets } from '../src/relayer.js';
 import { Identities } from '../src/identity.js';
 import { WalletIdentity } from '../src/wallet-identity.js';
-import { APPROVER, ApprovalService } from '../src/approval.js';
+import { ApprovalService } from '../src/approval.js';
 import { KeeperRenewals } from '../src/subscriptions-live.js';
 import { updateMerchantSettings } from '../src/merchant-settings.js';
 
 const router = '0x0000000000000000000000000000000000000001', escrow = '0x0000000000000000000000000000000000000002', subscription = '0x0000000000000000000000000000000000000003';
-const runtime = '0x60006000' as Hex;
 const merchant = privateKeyToAccount(generatePrivateKey());
 
 async function fixture() {
   const db = openDb(), chain = new FakeChain(true);
   const keys = seedMerchant(db, merchant.address.toLowerCase());
   const wallet = new WalletIdentity(db, { origin: 'http://localhost:3000' });
-  const relayer = new Relayer(chain, router, allowedTargets(escrow, subscription));
-  const approval = new ApprovalService(db, chain, { enabled: true, delegate: APPROVER, runtimeHash: keccak256(runtime), escrow, minimumAmount: 1_000_000n, confirmations: 1n });
+  const relayer = new Relayer(chain, router, allowedTargets({ escrow: escrow, subscription: subscription }));
+  const approval = new ApprovalService(db, chain, { enabled: true, escrow, minimumAmount: 1_000_000n, confirmations: 1n });
   const renewals = new KeeperRenewals(db, chain);
   const app = createApp({ db, chain, relayer, approval, renewals, wallet, identity: new Identities(wallet), router, escrow, subscription });
   const call = async (path: string, token: string, body?: unknown) => {
@@ -36,7 +35,7 @@ async function fixture() {
   return { db, chain, keys, call, signIn };
 }
 
-describe('customer subscriptions (live mode, SubscriptionManager V1)', () => {
+describe('customer subscriptions (live mode)', () => {
   it('subscribes with a relayed approval and a signed mandate, renews, refuses early and cancels', async () => {
     const f = await fixture(), customer = privateKeyToAccount(generatePrivateKey());
     const plan = (await f.call('/v1/subscriptions/plans', f.keys.secretKey, { name: 'API Growth', description: 'Monthly API access', amount: '5', periodSeconds: 120, maxPeriods: 6 })).body;
@@ -45,7 +44,8 @@ describe('customer subscriptions (live mode, SubscriptionManager V1)', () => {
     expect((await f.call(`/v1/commerce/plans/${plan.id}`, '')).body.plan).toMatchObject({ id: plan.id, amountMinor: '5000000' });
 
     const token = await f.signIn(customer);
-    // Allowance short: the intent asks for the one-time approval first.
+    // Allowance short: the intent asks for the one-time approval (a USDT permit Pact relays) first.
+    f.chain.approval.state.allowance = 0n;
     const first = (await f.call(`/v1/commerce/plans/${plan.id}/subscription-intent`, token, {})).body;
     expect(first.approval.status).toBe('needs_approval');
     expect(first.approval.amount).toBe('30000000'); // 6 periods of 5 USDT
@@ -74,12 +74,12 @@ describe('customer subscriptions (live mode, SubscriptionManager V1)', () => {
     expect(renewed.subscription.periodsCharged).toBe(1);
     expect((await f.call('/v1/subscriptions/plans', f.keys.secretKey)).body.data[0]).toMatchObject({ activeSubscribers: 1 });
 
-    // Customer cancels with a signed intent the relayer sends.
+    // Customer signs a cancellation the relayer sends: no gas for anyone but Pact.
     const intent = (await f.call(`/v1/commerce/me/subscriptions/${created.body.id}/cancel-intent`, token, {})).body;
     const t = intent.typedData;
-    const message = Object.fromEntries(Object.entries(t.message).map(([k, v]) => [k, ['signer', 'merchant', 'target', 'dataHash'].includes(k) ? v : k === 'maxGas' ? Number(v) : BigInt(v as string)]));
-    const cancelSig = await customer.signTypedData({ domain: { ...t.domain, chainId: Number(t.domain.chainId) }, types: { Intent: t.types.Intent }, primaryType: 'Intent', message: message as never });
-    const cancelled = await f.call(`/v1/commerce/me/subscriptions/${created.body.id}/cancel`, token, { intent: intent.intent, data: intent.data, signature: cancelSig });
+    expect(t.primaryType).toBe('Cancel');
+    const cancelSig = await customer.signTypedData({ domain: { ...t.domain, chainId: Number(t.domain.chainId) }, types: { Cancel: t.types.Cancel }, primaryType: 'Cancel', message: { id: t.message.id, deadline: BigInt(t.message.deadline) } });
+    const cancelled = await f.call(`/v1/commerce/me/subscriptions/${created.body.id}/cancel`, token, { deadline: intent.deadline, signature: cancelSig });
     expect(cancelled.status).toBe(200);
     expect((await f.call(`/v1/commerce/me/subscriptions/${created.body.id}`, token)).body.status).toBe('cancelled');
   });
@@ -108,6 +108,22 @@ describe('customer subscriptions (live mode, SubscriptionManager V1)', () => {
     expect((await f.call(`/v1/commerce/me/subscriptions/${created.id}/change-intent`, token, { planId: basic.id })).status).toBe(409);
   });
 
+  it('refuses a plan change before any signature while a charge is still confirming', async () => {
+    const f = await fixture(), customer = privateKeyToAccount(generatePrivateKey());
+    const basic = (await f.call('/v1/subscriptions/plans', f.keys.secretKey, { name: 'Basic', amount: '2', periodSeconds: 120, maxPeriods: 6 })).body;
+    const pro = (await f.call('/v1/subscriptions/plans', f.keys.secretKey, { name: 'Pro', amount: '4', periodSeconds: 120, maxPeriods: 6 })).body;
+    const token = await f.signIn(customer);
+    const first = (await f.call(`/v1/commerce/plans/${basic.id}/subscription-intent`, token, {})).body;
+    const t = first.typedData;
+    const signature = await customer.signTypedData({ domain: { ...t.domain, chainId: Number(t.domain.chainId) }, types: { Mandate: t.types.Mandate }, primaryType: 'Mandate', message: { ...first.mandate, amountCap: BigInt(first.mandate.amountCap), periodSeconds: BigInt(first.mandate.periodSeconds), endTime: BigInt(first.mandate.endTime), nonce: BigInt(first.mandate.nonce) } });
+    const created = (await f.call(`/v1/commerce/plans/${basic.id}/subscribe`, token, { mandate: first.mandate, signature })).body;
+    // The first renewal is in flight: its transaction is not yet confirmed.
+    f.db.prepare('UPDATE subscriptions SET pending_tx_hash=? WHERE id=?').run(keccak256('0x01'), created.id);
+    const refused = await f.call(`/v1/commerce/me/subscriptions/${created.id}/change-intent`, token, { planId: pro.id });
+    expect(refused).toMatchObject({ status: 422, body: { error: { code: 'subscription_pending' } } });
+    f.db.prepare('UPDATE subscriptions SET pending_tx_hash=NULL WHERE id=?').run(created.id);
+    expect((await f.call(`/v1/commerce/me/subscriptions/${created.id}/change-intent`, token, { planId: pro.id })).status).toBe(200);
+  });
   it('archived plans take no new signups but keep their subscribers', async () => {
     const f = await fixture();
     const plan = (await f.call('/v1/subscriptions/plans', f.keys.secretKey, { name: 'Old plan', amount: '2', periodSeconds: 60 })).body;

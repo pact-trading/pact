@@ -10,9 +10,9 @@ import { KeeperRenewals } from '../src/subscriptions-live.js';
 
 const addresses = { router: '0x0000000000000000000000000000000000000001', escrow: '0x0000000000000000000000000000000000000002', subscription: '0x0000000000000000000000000000000000000003' } as const;
 function fixture(version: 1 | 2 = 1, dashboard = false) {
-  const db = openDb(), chain = new FakeChain(true, version);
+  const db = openDb(), chain = new FakeChain(true);
   const keys = seedMerchant(db, addresses.router, { webhookUrl: 'https://merchant.example/webhook' });
-  const relayer = new Relayer(chain, addresses.router, allowedTargets(addresses.escrow, addresses.subscription, version));
+  const relayer = new Relayer(chain, addresses.router, allowedTargets({ escrow: addresses.escrow, subscription: addresses.subscription }));
   const renewals = new KeeperRenewals(db, chain);
   const identity = dashboard ? {
     handles: (token: string) => token === 'dashboard-session',
@@ -20,8 +20,8 @@ function fixture(version: 1 | 2 = 1, dashboard = false) {
     authenticate: vi.fn(), register: vi.fn(),
   } : undefined;
   const app = createApp({ db, chain, relayer, renewals, identity, ...addresses });
-  db.prepare('INSERT INTO plans(id,merchant_id,name,amount_minor,period_seconds,created_at) VALUES (?,?,?,?,?,?)').run('plan', keys.merchantId, 'Monthly', '2000000', 86400, '2026-11-06T00:00:00.000Z');
-  db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,created_at) VALUES (?,?,?,?,?,?,?,?)').run('sub', keys.merchantId, 'plan', keccak256(toHex('sub')), addresses.escrow, 'active', '2026-11-07T00:00:00.000Z', '2026-11-06T00:00:00.000Z');
+  db.prepare('INSERT INTO plans(id,merchant_id,name,amount_minor,period_seconds,created_at) VALUES (?,?,?,?,?,?)').run('plan', keys.merchantId, 'Monthly', '2000000', 86400, '2026-01-01T00:00:00.000Z');
+  db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,created_at) VALUES (?,?,?,?,?,?,?,?)').run('sub', keys.merchantId, 'plan', keccak256(toHex('sub')), addresses.escrow, 'active', '2026-01-02T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
   const post = (key = keys.secretKey, body: unknown = { by: 'merchant' }) => app.request('/v1/subscriptions/sub/cancel', { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
   return { db, chain, keys, renewals, app, post };
 }
@@ -87,7 +87,7 @@ describe('merchant cancellation', () => {
   });
   it('adds nullable cancellation columns to an existing database without losing records', () => {
     const old = new Database(':memory:');
-    old.exec("CREATE TABLE subscriptions(id TEXT PRIMARY KEY, merchant_id TEXT NOT NULL, plan_id TEXT NOT NULL, chain_id TEXT, payer TEXT, status TEXT NOT NULL, next_charge_at TEXT NOT NULL, retry_count INTEGER NOT NULL DEFAULT 0, pending_tx_hash TEXT, created_at TEXT NOT NULL); INSERT INTO subscriptions(id,merchant_id,plan_id,status,next_charge_at,created_at) VALUES ('old','merchant','plan','active','2026-11-06','2026-11-06')");
+    old.exec("CREATE TABLE subscriptions(id TEXT PRIMARY KEY, merchant_id TEXT NOT NULL, plan_id TEXT NOT NULL, chain_id TEXT, payer TEXT, status TEXT NOT NULL, next_charge_at TEXT NOT NULL, retry_count INTEGER NOT NULL DEFAULT 0, pending_tx_hash TEXT, created_at TEXT NOT NULL); INSERT INTO subscriptions(id,merchant_id,plan_id,status,next_charge_at,created_at) VALUES ('old','merchant','plan','active','2026-01-01','2026-01-01')");
     const migrated = openDb(old.serialize());
     expect(migrated.prepare('SELECT id,status,cancelled_at,cancelled_by FROM subscriptions').get()).toEqual({ id: 'old', status: 'active', cancelled_at: null, cancelled_by: null });
     migrated.close(); old.close();

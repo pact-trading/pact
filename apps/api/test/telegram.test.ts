@@ -39,7 +39,7 @@ function fixture(telegram: typeof config | undefined = config) {
     if (!users[token]) throw new IdentityError('invalid_identity_token', 401);
     return users[token];
   }, async merchantFor() { throw new IdentityError('merchant_not_registered', 403); } } as unknown as PrivyIdentity;
-  const app = createApp({ telegram, db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets(address(2), address(3))) });
+  const app = createApp({ telegram, db, chain, identity, relayer: new Relayer(chain, address(1), allowedTargets({ escrow: address(2), subscription: address(3) })) });
   let count = 0;
   const request = async (path: string, token: string, body?: unknown) => {
     const result = await app.request(path, { method: body === undefined ? 'GET' : 'POST', headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/json', 'idempotency-key': `key-${++count}` }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
