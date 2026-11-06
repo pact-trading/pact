@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "Pact Store",
+    "slug": "pact-store",
+    "scheme": "settlestore",
+    "ios": {"bundleIdentifier": "dev.pact.example.store"},
+    "android": {"package": "dev.pact.example.store"},
+    "plugins": ["expo-secure-store"]
+  }
+}

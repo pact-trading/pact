@@ -1,0 +1,25 @@
+{
+  "name": "@pact/example-merchant-store",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "dev": "next dev --port 3210",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 3210",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pactagent/checkout-react": "workspace:*",
+    "@pactagent/core": "workspace:*",
+    "next": "^15.5.6",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "^5.9.3"
+  }
+}

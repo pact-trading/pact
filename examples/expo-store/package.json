@@ -1,0 +1,16 @@
+{
+  "name": "@pact/example-expo-store",
+  "version": "0.1.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {"start": "expo start", "typecheck": "tsc -p tsconfig.json"},
+  "dependencies": {
+    "@pactagent/core": "workspace:*",
+    "@pactagent/react-native": "workspace:*",
+    "expo": "^54.0.0",
+    "expo-linking": "^8.0.0",
+    "expo-secure-store": "^15.0.0",
+    "react": "^19.1.0",
+    "react-native": "^0.81.0"
+  }
+}
