@@ -1,0 +1,807 @@
+{
+  "base": "http://127.0.0.1:3200",
+  "generatedAt": "2026-11-06T15:43:56.567Z",
+  "results": [
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-overview",
+      "path": "/dashboard",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-onboarding",
+      "path": "/dashboard/onboarding",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-products",
+      "path": "/dashboard/products",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-orders",
+      "path": "/dashboard/orders",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-customer",
+      "path": "/dashboard/customers/cus_acme",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-invoices",
+      "path": "/dashboard/invoices",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-invoice",
+      "path": "/dashboard/invoices/inv_1042",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-invoice-new",
+      "path": "/dashboard/invoices/new",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-subscriptions",
+      "path": "/dashboard/subscriptions",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-paid-api",
+      "path": "/dashboard/paid-api",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-gas-tank",
+      "path": "/dashboard/gas-tank",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-security",
+      "path": "/dashboard/security",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-developers",
+      "path": "/dashboard/developers",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-webhooks",
+      "path": "/dashboard/developers?tab=webhooks",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "merchant-settings",
+      "path": "/dashboard/settings",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "accountant-exports",
+      "path": "/dashboard/exports",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "customer-buy",
+      "path": "/buy/prod_audit",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "customer-subscribe",
+      "path": "/subscribe/plan_growth",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "customer-invoice",
+      "path": "/invoice/inv_1042",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "customer-portal",
+      "path": "/portal",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "customer-subscriptions",
+      "path": "/portal/subscriptions",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "agent-console",
+      "path": "/portal/agents/agt_research",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "customer-account",
+      "path": "/portal/account",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "demo",
+      "path": "/demo",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "desktop",
+      "name": "landing",
+      "path": "/",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-overview",
+      "path": "/dashboard",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-onboarding",
+      "path": "/dashboard/onboarding",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-products",
+      "path": "/dashboard/products",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-orders",
+      "path": "/dashboard/orders",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-customer",
+      "path": "/dashboard/customers/cus_acme",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-invoices",
+      "path": "/dashboard/invoices",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-invoice",
+      "path": "/dashboard/invoices/inv_1042",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-invoice-new",
+      "path": "/dashboard/invoices/new",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-subscriptions",
+      "path": "/dashboard/subscriptions",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-paid-api",
+      "path": "/dashboard/paid-api",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-gas-tank",
+      "path": "/dashboard/gas-tank",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-security",
+      "path": "/dashboard/security",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-developers",
+      "path": "/dashboard/developers",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-webhooks",
+      "path": "/dashboard/developers?tab=webhooks",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "merchant-settings",
+      "path": "/dashboard/settings",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "accountant-exports",
+      "path": "/dashboard/exports",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "customer-buy",
+      "path": "/buy/prod_audit",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "customer-subscribe",
+      "path": "/subscribe/plan_growth",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "customer-invoice",
+      "path": "/invoice/inv_1042",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "customer-portal",
+      "path": "/portal",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "customer-subscriptions",
+      "path": "/portal/subscriptions",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "agent-console",
+      "path": "/portal/agents/agt_research",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "customer-account",
+      "path": "/portal/account",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "demo",
+      "path": "/demo",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "light",
+      "viewport": "mobile",
+      "name": "landing",
+      "path": "/",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-overview",
+      "path": "/dashboard",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-onboarding",
+      "path": "/dashboard/onboarding",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-products",
+      "path": "/dashboard/products",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-orders",
+      "path": "/dashboard/orders",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-customer",
+      "path": "/dashboard/customers/cus_acme",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-invoices",
+      "path": "/dashboard/invoices",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-invoice",
+      "path": "/dashboard/invoices/inv_1042",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-invoice-new",
+      "path": "/dashboard/invoices/new",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-subscriptions",
+      "path": "/dashboard/subscriptions",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-paid-api",
+      "path": "/dashboard/paid-api",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-gas-tank",
+      "path": "/dashboard/gas-tank",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-security",
+      "path": "/dashboard/security",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-developers",
+      "path": "/dashboard/developers",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-webhooks",
+      "path": "/dashboard/developers?tab=webhooks",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "merchant-settings",
+      "path": "/dashboard/settings",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "accountant-exports",
+      "path": "/dashboard/exports",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "customer-buy",
+      "path": "/buy/prod_audit",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "customer-subscribe",
+      "path": "/subscribe/plan_growth",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "customer-invoice",
+      "path": "/invoice/inv_1042",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "customer-portal",
+      "path": "/portal",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "customer-subscriptions",
+      "path": "/portal/subscriptions",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "agent-console",
+      "path": "/portal/agents/agt_research",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "customer-account",
+      "path": "/portal/account",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "demo",
+      "path": "/demo",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "desktop",
+      "name": "landing",
+      "path": "/",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-overview",
+      "path": "/dashboard",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-onboarding",
+      "path": "/dashboard/onboarding",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-products",
+      "path": "/dashboard/products",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-orders",
+      "path": "/dashboard/orders",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-customer",
+      "path": "/dashboard/customers/cus_acme",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-invoices",
+      "path": "/dashboard/invoices",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-invoice",
+      "path": "/dashboard/invoices/inv_1042",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-invoice-new",
+      "path": "/dashboard/invoices/new",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-subscriptions",
+      "path": "/dashboard/subscriptions",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-paid-api",
+      "path": "/dashboard/paid-api",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-gas-tank",
+      "path": "/dashboard/gas-tank",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-security",
+      "path": "/dashboard/security",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-developers",
+      "path": "/dashboard/developers",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-webhooks",
+      "path": "/dashboard/developers?tab=webhooks",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "merchant-settings",
+      "path": "/dashboard/settings",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "accountant-exports",
+      "path": "/dashboard/exports",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "customer-buy",
+      "path": "/buy/prod_audit",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "customer-subscribe",
+      "path": "/subscribe/plan_growth",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "customer-invoice",
+      "path": "/invoice/inv_1042",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "customer-portal",
+      "path": "/portal",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "customer-subscriptions",
+      "path": "/portal/subscriptions",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "agent-console",
+      "path": "/portal/agents/agt_research",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "customer-account",
+      "path": "/portal/account",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "demo",
+      "path": "/demo",
+      "status": 200,
+      "overflowPx": 0
+    },
+    {
+      "theme": "dark",
+      "viewport": "mobile",
+      "name": "landing",
+      "path": "/",
+      "status": 200,
+      "overflowPx": 0
+    }
+  ],
+  "failures": []
+}
