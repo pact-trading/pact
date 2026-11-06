@@ -26,7 +26,7 @@ const validEmail = (x: unknown): x is string => typeof x === 'string' && x.lengt
 /**
  * Sign-In with Ethereum (EIP-4361). The wallet signs a one-time message naming this site,
  * chain 1874 and a server nonce; the API returns a session token. The wallet address is the
- * identity: as a merchant it owns its data and its GasTank balance.
+ * identity: as a merchant it owns its data and the fee terms it signed.
  */
 export class WalletIdentity implements Identity {
   private readonly config: Required<Omit<WalletIdentityConfig, 'verify'>> & Pick<WalletIdentityConfig, 'verify'>;

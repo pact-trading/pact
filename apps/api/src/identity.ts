@@ -4,7 +4,7 @@ import { id, now, type Db } from './db.js';
 
 export interface IdentityConfig { appId: string; appSecret: string; verificationKey?: string }
 export class IdentityError extends Error {
-  constructor(readonly code: string, readonly status: 400 | 401 | 403 | 404 | 409 | 503) { super(code); }
+  constructor(readonly code: string, readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 503) { super(code); }
 }
 export function identityConfig(env: Record<string, string | undefined>): IdentityConfig | undefined {
   if (!env.PRIVY_APP_ID && !env.PRIVY_APP_SECRET && !env.PRIVY_VERIFICATION_KEY) return undefined;

@@ -2,13 +2,13 @@ import type { Address, Hex } from 'viem';
 import type { WriteOperation } from './account-writer.js';
 import { amountString, id, type Db } from './db.js';
 import { chargedPeriods, discountTerms, discountView, renewalDiscountAmount } from './discounts.js';
-import { RenewalStore, setRenewalStatus, type RenewalStatus } from './funded-renewal-store.js';
+import { initRenewalStatus, setRenewalStatus, type RenewalStatus } from './renewal-status.js';
 import { readSubscriptionMandate } from './subscription-mandates.js';
 import type { ChainAdapter } from './types.js';
 import { Refusal } from './types.js';
 import { assertSubscriptionAvailable } from './write-reservations.js';
 
-/** Renewals sent by the keeper key, which SubscriptionManager V1 allows to call `charge` directly. */
+/** Renewals sent by the keeper key, which the SubscriptionManager allows to call `charge` directly. */
 export interface Renewals {
   readonly chain: ChainAdapter;
   readonly store: { db: Db };
@@ -18,13 +18,14 @@ export interface Renewals {
 
 /**
  * The keeper pulls each renewal itself. The contract still checks every rule (cap, period, cancelled,
- * expired, funds) and records a refusal with its reason. `force` sends a merchant's "Run renewal now"
- * to the contract even when it is early or cancelled, so the refusal is on chain, not just in our API.
- * The keeper's gas is paid by the relayer, not by the merchant's tank.
+ * expired, funds, the merchant's fee terms) and records a refusal with its reason. `force` sends a
+ * merchant's "Run renewal now" to the contract even when it is early or cancelled, so the refusal is
+ * on chain, not just in our API. Pact's relayer pays the gas; the renewal's fee, taken out of the
+ * payment, covers it.
  */
 export class KeeperRenewals implements Renewals {
-  readonly store: RenewalStore;
-  constructor(private readonly db: Db, readonly chain: ChainAdapter) { this.store = new RenewalStore(db); }
+  readonly store: { db: Db };
+  constructor(private readonly db: Db, readonly chain: ChainAdapter) { initRenewalStatus(db); this.store = { db }; }
   status(subscriptionId: string): RenewalStatus {
     const row = this.db.prepare('SELECT state,reason,operation_id FROM renewal_service_status WHERE subscription_id=?').get(subscriptionId) as { state: string; reason: string; operation_id: string | null } | undefined;
     return row ? { state: row.state, reason: row.reason, ...(row.operation_id ? { operationId: row.operation_id } : {}) } : { state: 'idle', reason: '' };
