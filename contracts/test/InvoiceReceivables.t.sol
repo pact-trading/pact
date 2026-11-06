@@ -822,7 +822,9 @@ contract InvoiceReceivablesTest is Test {
         uint256 id = _list(300);
         uint256 merchantBefore = token.balanceOf(merchant);
         vm.expectEmit(true, true, true, true, address(market));
-        emit InvoiceReceivables.Paid(id, keccak256("p1"), payer, 100 * USDT, 0, 100 * USDT - 500_000, 500_000);
+        emit InvoiceReceivables.Paid(
+            id, keccak256("p1"), payer, 100 * USDT, 0, 100 * USDT - 500_000, 500_000, feeVault
+        );
         _pay(id, keccak256("p1"), 100 * USDT);
         assertEq(uint8(_status(id)), uint8(InvoiceReceivables.Status.Withdrawn));
         // Never financed: paid like any invoice, less Pact's 0.5% invoice fee.
@@ -1166,5 +1168,81 @@ contract InvoiceReceivablesTest is Test {
             assertLe(received[i], units[i] + (units[i] * 100) / 10_000);
             assertGe(received[i], units[i]);
         }
+    }
+
+    // ---------------------------------------------------------------- EIP-3009 payments (v3)
+
+    function _payAuthorization(uint256 key, uint256 id, bytes32 paymentId, uint256 amount)
+        internal
+        view
+        returns (uint8 v, bytes32 r, bytes32 s)
+    {
+        address from = vm.addr(key);
+        bytes32 structHash = keccak256(
+            abi.encode(
+                token.RECEIVE_WITH_AUTHORIZATION_TYPEHASH(),
+                from,
+                address(market),
+                amount,
+                uint256(0),
+                block.timestamp + 1 hours,
+                market.payAuthorizationNonce(id, paymentId, amount, from)
+            )
+        );
+        (v, r, s) = vm.sign(key, keccak256(abi.encodePacked("\x19\x01", token.DOMAIN_SEPARATOR(), structHash)));
+    }
+
+    function _payWithAuthorization(uint256 key, uint256 id, bytes32 paymentId, uint256 amount) internal {
+        (uint8 v, bytes32 r, bytes32 s) = _payAuthorization(key, id, paymentId, amount);
+        vm.prank(outsider);
+        market.payWithAuthorization(id, paymentId, amount, vm.addr(key), 0, block.timestamp + 1 hours, v, r, s);
+    }
+
+    function testPayWithAuthorizationNeedsNoAllowance() public {
+        uint256 id = _list(300);
+        vm.prank(payer);
+        token.approve(address(market), 0);
+        uint256 merchantBefore = token.balanceOf(merchant);
+        vm.expectEmit(true, true, true, true, address(market));
+        emit InvoiceReceivables.Paid(id, keccak256("p1"), payer, 100 * USDT, 0, 100 * USDT - 500_000, 500_000, feeVault);
+        _payWithAuthorization(PAYER_KEY, id, keccak256("p1"), 100 * USDT);
+        assertEq(uint8(_status(id)), uint8(InvoiceReceivables.Status.Withdrawn));
+        assertEq(token.balanceOf(merchant) - merchantBefore, 100 * USDT - 500_000);
+        assertEq(token.balanceOf(feeVault), 500_000);
+    }
+
+    function testPayWithAuthorizationPaysTheHoldersLikePay() public {
+        uint256 id = _list(300);
+        _buy(alice, id, 500 * USDT);
+        _payWithAuthorization(PAYER_KEY, id, keccak256("p1"), 100 * USDT);
+        assertEq(uint8(_status(id)), uint8(InvoiceReceivables.Status.Funded));
+        assertEq(_received(id, alice), 50 * USDT);
+        // The same payment id is single-use whichever way it was paid.
+        (uint8 v, bytes32 r, bytes32 s) = _payAuthorization(PAYER_KEY, id, keccak256("p1"), 100 * USDT);
+        vm.expectRevert(InvoiceReceivables.PaymentUsed.selector);
+        market.payWithAuthorization(id, keccak256("p1"), 100 * USDT, payer, 0, block.timestamp + 1 hours, v, r, s);
+        vm.expectRevert(InvoiceReceivables.PaymentUsed.selector);
+        _pay(id, keccak256("p1"), 100 * USDT);
+    }
+
+    function testThePayAuthorizationBindsAmountPaymentAndPayer() public {
+        uint256 id = _list(300);
+        _buy(alice, id, 500 * USDT);
+        (uint8 v, bytes32 r, bytes32 s) = _payAuthorization(PAYER_KEY, id, keccak256("p1"), 100 * USDT);
+        vm.expectRevert("invalid signature");
+        market.payWithAuthorization(id, keccak256("p1"), 200 * USDT, payer, 0, block.timestamp + 1 hours, v, r, s);
+        vm.expectRevert("invalid signature");
+        market.payWithAuthorization(id, keccak256("p2"), 100 * USDT, payer, 0, block.timestamp + 1 hours, v, r, s);
+        vm.expectRevert(InvoiceReceivables.NotAuthorized.selector);
+        market.payWithAuthorization(id, keccak256("p1"), 100 * USDT, address(0), 0, block.timestamp + 1 hours, v, r, s);
+        assertEq(_received(id, alice), 0);
+    }
+
+    function testOnlyTheDebtorPaysAnOpenListingByAuthorizationToo() public {
+        uint256 id = _list(300);
+        _buy(alice, id, 500 * USDT);
+        (uint8 v, bytes32 r, bytes32 s) = _payAuthorization(BOB_KEY, id, keccak256("p1"), 100 * USDT);
+        vm.expectRevert(InvoiceReceivables.NotAuthorized.selector);
+        market.payWithAuthorization(id, keccak256("p1"), 100 * USDT, bob, 0, block.timestamp + 1 hours, v, r, s);
     }
 }

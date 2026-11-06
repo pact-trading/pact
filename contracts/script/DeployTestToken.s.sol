@@ -32,7 +32,8 @@ contract DeployTestToken is Script, SuiteDeployment {
         uint256 usdtPerWBT = vm.envUint("USDT_PER_WBT");
         vm.startBroadcast(deployerKey);
         token = new MockNoBoolUSDT();
-        (fees, router, escrow, subscriptions) = _deploySuite(IERC20(address(token)), relayer, keeper, usdtPerWBT);
+        (fees, router, escrow, subscriptions) =
+            _deploySuite(IERC20(address(token)), relayer, keeper, usdtPerWBT, CANONICAL_PERMIT2);
         vm.stopBroadcast();
     }
 }

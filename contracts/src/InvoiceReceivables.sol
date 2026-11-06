@@ -4,11 +4,12 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {Signatures} from "./Signatures.sol";
 import {SponsoredContext} from "./SponsoredContext.sol";
 import {IFeeSchedule} from "./FeeSchedule.sol";
+import {IERC3009} from "./interfaces/IERC3009.sol";
 
 /// @notice What an earlier receivables deployment has pledged, so a debt is never sold on two of them.
 interface IPledges {
@@ -44,7 +45,7 @@ interface IInvestorRegistry {
 /// - Investors may buy, transfer and withdraw with a signature (and a USDT permit) that anyone
 ///   submits, and merchants may list, cancel and withdraw the same way, so a relayer pays the gas. A
 ///   buy-back goes through the Router, signed by the merchant, who pays its gas in USDT.
-contract InvoiceReceivables is SponsoredContext, ReentrancyGuard, EIP712 {
+contract InvoiceReceivables is SponsoredContext, ReentrancyGuardTransient, EIP712 {
     using SafeERC20 for IERC20;
 
     error InvalidConfig();
@@ -172,6 +173,9 @@ contract InvoiceReceivables is SponsoredContext, ReentrancyGuard, EIP712 {
     uint256 private constant BPS = 10_000;
     uint8 private constant INVOICE = 1;
     uint256 private constant MAX_TERM = 400 days;
+    /// @notice What the EIP-3009 nonce of `payWithAuthorization` commits to (with this contract and chain).
+    bytes32 public constant PAY_AUTHORIZATION_TYPEHASH =
+        keccak256("PayAuthorization(uint256 claimId,bytes32 paymentId,uint256 amount,address payer)");
     bytes32 public constant PURCHASE_TYPEHASH = keccak256(
         "Purchase(uint256 claimId,address investor,uint256 units,uint256 maxPrice,uint256 nonce,uint256 deadline)"
     );
@@ -250,7 +254,8 @@ contract InvoiceReceivables is SponsoredContext, ReentrancyGuard, EIP712 {
     event Transferred(
         uint256 indexed claimId, address indexed from, address indexed to, uint256 units, uint256 received
     );
-    /// @notice `toMerchant` is what the merchant received, after `fee`.
+    /// @notice `toMerchant` is what the merchant received, after `fee`, which went to `feeRecipient`
+    /// (zero when there is no fee).
     event Paid(
         uint256 indexed claimId,
         bytes32 indexed paymentId,
@@ -258,7 +263,8 @@ contract InvoiceReceivables is SponsoredContext, ReentrancyGuard, EIP712 {
         uint256 amount,
         uint256 toHolders,
         uint256 toMerchant,
-        uint256 fee
+        uint256 fee,
+        address feeRecipient
     );
     event HolderPaid(uint256 indexed claimId, address indexed holder, uint256 amount, Source source);
     event Settled(uint256 indexed claimId, uint256 fromReserve, uint256 reserveReleased);
@@ -632,7 +638,47 @@ contract InvoiceReceivables is SponsoredContext, ReentrancyGuard, EIP712 {
     function pay(uint256 claimId, bytes32 paymentId, uint256 amount) external nonReentrant {
         Claim storage c = claims[claimId];
         _checkMerchant(c.merchant);
-        address payer = _actor();
+        _pay(claimId, c, paymentId, amount, _actor(), "");
+    }
+
+    /// @notice `pay` with the payer's EIP-3009 `ReceiveWithAuthorization` signature instead of an
+    /// allowance: `from` the payer, `to` this contract, `value` the amount, `nonce` =
+    /// `payAuthorizationNonce(claimId, paymentId, amount, payer)`. Anyone may submit it.
+    function payWithAuthorization(
+        uint256 claimId,
+        bytes32 paymentId,
+        uint256 amount,
+        address payer,
+        uint256 validAfter,
+        uint256 validBefore,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external nonReentrant {
+        if (payer == address(0)) revert NotAuthorized();
+        _pay(claimId, claims[claimId], paymentId, amount, payer, abi.encode(validAfter, validBefore, v, r, s));
+    }
+
+    /// @notice The EIP-3009 nonce a payer signs for `payWithAuthorization`: it commits to the claim,
+    /// the payment id, the amount and the payer, on this contract and chain.
+    function payAuthorizationNonce(uint256 claimId, bytes32 paymentId, uint256 amount, address payer)
+        public
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(PAY_AUTHORIZATION_TYPEHASH, claimId, paymentId, amount, payer, address(this), block.chainid)
+        );
+    }
+
+    function _pay(
+        uint256 claimId,
+        Claim storage c,
+        bytes32 paymentId,
+        uint256 amount,
+        address payer,
+        bytes memory authorization
+    ) internal {
         if (c.status != Status.Listed && c.status != Status.Funded && c.status != Status.Defaulted) {
             revert WrongStatus();
         }
@@ -645,7 +691,23 @@ contract InvoiceReceivables is SponsoredContext, ReentrancyGuard, EIP712 {
         if (amount != left && (amount < minShare || left - amount < minShare)) revert InvalidAmount();
         paymentUsed[key] = true;
         c.collected += amount;
-        usdt.safeTransferFrom(payer, address(this), amount);
+        if (authorization.length == 0) {
+            usdt.safeTransferFrom(payer, address(this), amount);
+        } else {
+            (uint256 validAfter, uint256 validBefore, uint8 v, bytes32 r, bytes32 s) =
+                abi.decode(authorization, (uint256, uint256, uint8, bytes32, bytes32));
+            IERC3009(address(usdt)).receiveWithAuthorization(
+                payer,
+                address(this),
+                amount,
+                validAfter,
+                validBefore,
+                payAuthorizationNonce(claimId, paymentId, amount, payer),
+                v,
+                r,
+                s
+            );
+        }
         if (c.status == Status.Listed) {
             if (c.sold == 0) {
                 // Paid before any investor bought: the listing ends and the merchant is paid as for any
@@ -653,10 +715,10 @@ contract InvoiceReceivables is SponsoredContext, ReentrancyGuard, EIP712 {
                 c.status = Status.Withdrawn;
                 _release(c);
                 emit Withdrawn(claimId);
-                uint256 fee = fees.feeFor(c.merchant, INVOICE, amount);
+                (uint256 fee, address recipient) = fees.quote(c.merchant, INVOICE, amount);
                 _push(c.merchant, amount - fee);
-                if (fee > 0) _push(fees.recipient(), fee);
-                emit Paid(claimId, paymentId, payer, amount, 0, amount - fee, fee);
+                if (fee > 0) _push(recipient, fee);
+                emit Paid(claimId, paymentId, payer, amount, 0, amount - fee, fee, fee > 0 ? recipient : address(0));
                 return;
             }
             c.status = Status.Funded;
@@ -673,7 +735,7 @@ contract InvoiceReceivables is SponsoredContext, ReentrancyGuard, EIP712 {
         c.fromCustomer += toHolders;
         uint256 toMerchant = amount - toHolders;
         if (toMerchant > 0) _push(c.merchant, toMerchant);
-        emit Paid(claimId, paymentId, payer, amount, toHolders, toMerchant, 0);
+        emit Paid(claimId, paymentId, payer, amount, toHolders, toMerchant, 0, address(0));
         if (c.status == Status.Funded && c.collected == c.face) _settle(claimId, c);
         else if (c.status == Status.Defaulted && _owed(claimId, c) == 0) _close(claimId, c);
     }

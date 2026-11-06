@@ -61,7 +61,7 @@ contract WhitechainForkSmokeTest is Test, SuiteDeployment {
         token = IERC20(USDT);
 
         // Same wiring and allowlist as Deploy.s.sol.
-        (fees, router, escrow, subscriptions) = _deploySuite(token, relayer, relayer, USDT_PER_WBT);
+        (fees, router, escrow, subscriptions) = _deploySuite(token, relayer, relayer, USDT_PER_WBT, CANONICAL_PERMIT2);
 
         assertEq(token.balanceOf(FUNDER), 3_500_000);
         assertEq(token.balanceOf(payer), 0);
@@ -122,13 +122,12 @@ contract WhitechainForkSmokeTest is Test, SuiteDeployment {
         assertEq(token.allowance(merchant, address(escrow)), 0);
         assertEq(token.allowance(merchant, address(router)), 1_000_000 - gasFee);
 
-        (address storedPayer, address storedMerchant, uint256 authorized, uint256 captured, uint256 refunded,,,,) =
-            escrow.payments(PAYMENT_ID);
-        assertEq(storedPayer, payer);
-        assertEq(storedMerchant, merchant);
-        assertEq(authorized, 2_000_000);
-        assertEq(captured, 2_000_000);
-        assertEq(refunded, 1_000_000);
+        PaymentEscrow.PaymentView memory stored = escrow.payment(PAYMENT_ID);
+        assertEq(stored.payer, payer);
+        assertEq(stored.merchant, merchant);
+        assertEq(stored.authorized, 2_000_000);
+        assertEq(stored.captured, 2_000_000);
+        assertEq(stored.refunded, 1_000_000);
         assertTrue(router.usedNonces(payer, 1));
         assertTrue(router.usedNonces(merchant, 2));
         assertEq(payer.balance, 0);

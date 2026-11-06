@@ -4,11 +4,15 @@ test = 'test'
 script = 'script'
 libs = ['lib']
 solc = '0.8.26'
-evm_version = 'paris'
+# Whitechain (OP Stack Isthmus) runs Prague: PUSH0, TSTORE/TLOAD and MCOPY are live, CLZ is not
+# (Sepolia), so never target Osaka.
+evm_version = 'prague'
 via_ir = true
 optimizer = true
 optimizer_runs = 200
 remappings = ['forge-std/=lib/forge-std/src/', '@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/']
+# Unit tests etch Whitechain's canonical Permit2 runtime from this fixture.
+fs_permissions = [{ access = 'read', path = './test/fixtures' }]
 
 [fuzz]
 runs = 256

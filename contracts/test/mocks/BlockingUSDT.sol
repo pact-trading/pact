@@ -61,6 +61,41 @@ contract BlockingUSDT {
         emit Approval(owner, spender, value);
     }
 
+    bytes32 public constant RECEIVE_WITH_AUTHORIZATION_TYPEHASH = keccak256(
+        "ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"
+    );
+    mapping(address => mapping(bytes32 => bool)) public authorizationState;
+
+    /// @notice EIP-3009, as Whitechain Sepolia's USDT has it (FiatToken semantics).
+    function receiveWithAuthorization(
+        address from,
+        address to,
+        uint256 value,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        require(to == msg.sender, "caller must be the payee");
+        require(block.timestamp > validAfter && block.timestamp < validBefore, "authorization not valid now");
+        require(!authorizationState[from][nonce], "authorization is used or canceled");
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                DOMAIN_SEPARATOR(),
+                keccak256(
+                    abi.encode(RECEIVE_WITH_AUTHORIZATION_TYPEHASH, from, to, value, validAfter, validBefore, nonce)
+                )
+            )
+        );
+        address signer = ecrecover(digest, v, r, s);
+        require(signer != address(0) && signer == from, "invalid signature");
+        authorizationState[from][nonce] = true;
+        _transfer(from, to, value);
+    }
+
     function transfer(address to, uint256 amount) external {
         _transfer(msg.sender, to, amount);
     }

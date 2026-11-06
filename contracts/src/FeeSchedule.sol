@@ -12,6 +12,13 @@ interface IFeeSchedule {
     function gasFee(uint256 wbtWei) external view returns (uint256);
     /// @notice Where every fee is sent.
     function recipient() external view returns (address);
+    /// @notice `feeFor` and `recipient` in one call: what a payment contract needs to pay a fee out.
+    function quote(address merchant, uint8 product, uint256 amount)
+        external
+        view
+        returns (uint256 fee, address recipient);
+    /// @notice `gasFee` and `recipient` in one call: what the Router needs to charge a merchant's gas.
+    function gasQuote(uint256 wbtWei) external view returns (uint256 fee, address recipient);
 }
 
 /// @notice Pact's fee terms, one numbered version at a time. A merchant accepts a version by
@@ -134,7 +141,19 @@ contract FeeSchedule is IFeeSchedule, EIP712 {
         return _hashTypedDataV4(keccak256(abi.encode(ACCEPT_TYPEHASH, merchant, version, nonce, deadline)));
     }
 
-    function feeFor(address merchant, uint8 product, uint256 amount) external view returns (uint256 fee) {
+    function feeFor(address merchant, uint8 product, uint256 amount) external view returns (uint256) {
+        return _feeFor(merchant, product, amount);
+    }
+
+    function quote(address merchant, uint8 product, uint256 amount)
+        external
+        view
+        returns (uint256 fee, address recipient_)
+    {
+        return (_feeFor(merchant, product, amount), recipient);
+    }
+
+    function _feeFor(address merchant, uint8 product, uint256 amount) internal view returns (uint256 fee) {
         uint32 version = acceptedVersion[merchant];
         if (version == 0) revert TermsNotAccepted();
         Rate memory r = _rate(_terms[version], product);
@@ -175,6 +194,14 @@ contract FeeSchedule is IFeeSchedule, EIP712 {
     // ------------------------------------------------------------------ gas price
 
     function gasFee(uint256 wbtWei) external view returns (uint256) {
+        return _gasFee(wbtWei);
+    }
+
+    function gasQuote(uint256 wbtWei) external view returns (uint256 fee, address recipient_) {
+        return (_gasFee(wbtWei), recipient);
+    }
+
+    function _gasFee(uint256 wbtWei) internal view returns (uint256) {
         return (wbtWei * usdtPerWBT + 1e18 - 1) / 1e18;
     }
 

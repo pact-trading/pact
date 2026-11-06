@@ -40,7 +40,9 @@ contract CheckoutTest is PactSuite {
     function testChargePaysTheMerchantLessTheFee() public {
         uint256 fee = _checkoutFee(100_000_000);
         vm.expectEmit(true, true, true, true, address(escrow));
-        emit PaymentEscrow.Charged(ID, payer, merchant, 100_000_000, fee, 0);
+        emit PaymentEscrow.Charged(
+            ID, payer, merchant, 100_000_000, fee, 0, uint64(block.timestamp + 1 days), 1 days, relayer
+        );
         vm.prank(payer);
         escrow.charge(ID, merchant, 100_000_000, 1 days);
         assertEq(fee, 800_000);
@@ -69,8 +71,7 @@ contract CheckoutTest is PactSuite {
         vm.expectRevert(FeeSchedule.FeeExceedsAmount.selector);
         vm.prank(payer);
         escrow.charge(ID, merchant, 100_000, 1 days);
-        (address recordedPayer,,,,,,,,) = escrow.payments(ID);
-        assertEq(recordedPayer, address(0));
+        assertEq(escrow.payment(ID).payer, address(0));
     }
 
     function testEscrowLifecycleTakesTheFeeOnCaptureAndRefundsInFull() public {
@@ -80,7 +81,7 @@ contract CheckoutTest is PactSuite {
         assertEq(token.balanceOf(relayer), 0);
         uint256 fee = _checkoutFee(60_000_000);
         vm.expectEmit(true, false, false, true, address(escrow));
-        emit PaymentEscrow.Captured(ID, 60_000_000, fee);
+        emit PaymentEscrow.Captured(ID, 60_000_000, fee, uint64(block.timestamp + 7 days), 7 days, relayer);
         vm.prank(merchant);
         escrow.capture(ID, 60_000_000);
         assertEq(token.balanceOf(merchant), 1_000_000_000 + 60_000_000 - fee);
@@ -95,10 +96,11 @@ contract CheckoutTest is PactSuite {
         escrow.refund(ID, 1, REASON);
         vm.prank(merchant);
         escrow.void(ID);
-        (,, uint256 authorized, uint256 captured, uint256 refunded,,,,) = escrow.payments(ID);
-        assertEq(authorized, 100_000_000);
-        assertEq(captured, 60_000_000);
-        assertEq(refunded, 60_000_000);
+        PaymentEscrow.PaymentView memory p = escrow.payment(ID);
+        assertEq(p.authorized, 100_000_000);
+        assertEq(p.captured, 60_000_000);
+        assertEq(p.refunded, 60_000_000);
+        assertTrue(p.closed);
         assertEq(token.balanceOf(address(escrow)), 0);
         assertEq(token.balanceOf(payer), 1_000_000_000);
         assertEq(token.balanceOf(merchant), 1_000_000_000 - fee);
@@ -185,8 +187,7 @@ contract CheckoutTest is PactSuite {
             vm.prank(merchant);
             escrow.refund(ID, b, REASON);
         }
-        (,,,, uint256 refunded,,,,) = escrow.payments(ID);
-        assertLe(refunded, captured);
+        assertLe(escrow.payment(ID).refunded, captured);
         assertEq(token.balanceOf(relayer), _checkoutFee(captured));
     }
 

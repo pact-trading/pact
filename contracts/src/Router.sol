@@ -4,7 +4,8 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {IFeeSchedule} from "./FeeSchedule.sol";
 
 interface ISponsoredTarget {
@@ -16,8 +17,13 @@ interface ISponsoredTarget {
 /// terms the merchant accepted in the FeeSchedule. The Router only charges gas, in USDT, on calls
 /// allowlisted with `chargesGas`: calls where the merchant sends money (a refund, a buy-back) and so
 /// pays their gas on top. Those calls must be signed by the merchant itself.
-contract Router is ReentrancyGuard {
+///
+/// v3: the signed actor and merchant live in transient storage for the duration of the target call
+/// only; nonces are Permit2-style bitmaps (256 per storage word, so a signer's consecutive nonces
+/// share a slot); the EIP-712 domain separator is cached.
+contract Router is ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
+    using TransientSlot for *;
 
     error NotOwner();
     error InvalidConfig();
@@ -69,21 +75,28 @@ contract Router is ReentrancyGuard {
     );
     bytes32 private constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant NAME_HASH = keccak256("Settle Router");
+    bytes32 private constant VERSION_HASH = keccak256("2");
     /// @dev Gas the measurement cannot see: the transaction's intrinsic and calldata cost, and the fee transfer.
     uint256 public constant GAS_OVERHEAD = 60_000;
     uint256 private constant EXECUTION_GAS_RESERVE = 120_000;
+    /// @dev keccak256("pact.router.activeSigner") - 1 and keccak256("pact.router.activeMerchant") - 1.
+    bytes32 private constant ACTIVE_SIGNER_SLOT = 0xa4844a2ebc549ebc6d596c0ebc5c65dfeca4bf1827ce67680154d80cf071aecd;
+    bytes32 private constant ACTIVE_MERCHANT_SLOT = 0x15f6982200e8bd73e6b4f219893a97b79afe986acbf3d13b8e35d93fee1554de;
+
+    uint256 private immutable _cachedChainId;
+    bytes32 private immutable _cachedDomainSeparator;
 
     address public owner;
     IERC20 public immutable usdt;
     IFeeSchedule public immutable fees;
-    address public activeSigner;
-    address public activeMerchant;
     uint256 public minAmount;
     uint32 public maxPayerCallsPerDay;
     uint32 public maxGasPerCall;
     uint256 public maxGasPrice;
     mapping(address => mapping(bytes4 => Allowed)) public allowed;
-    mapping(address => mapping(uint256 => bool)) public usedNonces;
+    /// @notice Used nonces, 256 per word: bit `nonce & 0xff` of word `nonce >> 8`.
+    mapping(address => mapping(uint256 => uint256)) public nonceBitmap;
     mapping(address => Daily) public payerDaily;
 
     event Refused(address indexed signer, address indexed merchant, uint256 indexed nonce, Refusal reason);
@@ -109,6 +122,23 @@ contract Router is ReentrancyGuard {
         maxPayerCallsPerDay = 10;
         maxGasPerCall = 1_000_000;
         maxGasPrice = 100 gwei;
+        _cachedChainId = block.chainid;
+        _cachedDomainSeparator = _buildDomainSeparator();
+    }
+
+    /// @notice The signer of the intent whose target call is running, or zero outside one.
+    function activeSigner() external view returns (address) {
+        return ACTIVE_SIGNER_SLOT.asAddress().tload();
+    }
+
+    /// @notice The merchant of the intent whose target call is running, or zero outside one.
+    function activeMerchant() external view returns (address) {
+        return ACTIVE_MERCHANT_SLOT.asAddress().tload();
+    }
+
+    /// @notice Whether `signer` already used `nonce`.
+    function usedNonces(address signer, uint256 nonce) public view returns (bool) {
+        return nonceBitmap[signer][nonce >> 8] & (1 << (nonce & 0xff)) != 0;
     }
 
     /// @notice Set a precise target and selector allowlist entry.
@@ -139,11 +169,11 @@ contract Router is ReentrancyGuard {
 
     /// @notice EIP-712 domain separator for sponsored intents.
     function domainSeparator() public view returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                DOMAIN_TYPEHASH, keccak256(bytes("Settle Router")), keccak256(bytes("2")), block.chainid, address(this)
-            )
-        );
+        return block.chainid == _cachedChainId ? _cachedDomainSeparator : _buildDomainSeparator();
+    }
+
+    function _buildDomainSeparator() private view returns (bytes32) {
+        return keccak256(abi.encode(DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(this)));
     }
 
     /// @notice Hash an intent for EIP-712 signing.
@@ -173,7 +203,10 @@ contract Router is ReentrancyGuard {
             return _refuse(i, Refusal.InvalidSignature);
         }
         if (block.timestamp > i.deadline) return _refuse(i, Refusal.Deadline);
-        if (usedNonces[i.signer][i.nonce]) return _refuse(i, Refusal.Replay);
+        uint256 wordPos = i.nonce >> 8;
+        uint256 bit = 1 << (i.nonce & 0xff);
+        uint256 word = nonceBitmap[i.signer][wordPos];
+        if (word & bit != 0) return _refuse(i, Refusal.Replay);
         if (data.length < 4 || keccak256(data) != i.dataHash) return _refuse(i, Refusal.WrongSelector);
         Allowed memory rule = allowed[i.target][bytes4(data[:4])];
         if (!rule.enabled) return _refuse(i, Refusal.WrongSelector);
@@ -201,14 +234,14 @@ contract Router is ReentrancyGuard {
             );
         }
 
-        usedNonces[i.signer][i.nonce] = true;
+        nonceBitmap[i.signer][wordPos] = word | bit;
         if (daily.day != day) {
             daily.day = day;
             daily.count = 0;
         }
         daily.count++;
-        activeSigner = i.signer;
-        activeMerchant = i.merchant;
+        ACTIVE_SIGNER_SLOT.asAddress().tstore(i.signer);
+        ACTIVE_MERCHANT_SLOT.asAddress().tstore(i.merchant);
         bytes memory callData = data;
         // The early policy check precedes external reads and storage writes. Recheck here
         // so EIP-150 cannot clip the signed target allowance and consume a nonce on failure.
@@ -218,8 +251,8 @@ contract Router is ReentrancyGuard {
             revert InsufficientExecutionGas();
         }
         (bool ok, bytes memory result) = i.target.call{gas: targetGas}(callData);
-        activeSigner = address(0);
-        activeMerchant = address(0);
+        ACTIVE_SIGNER_SLOT.asAddress().tstore(address(0));
+        ACTIVE_MERCHANT_SLOT.asAddress().tstore(address(0));
         if (!ok) return _refuse(i, Refusal.TargetFailed);
         if (rule.mustReturnTrue && (result.length != 32 || !abi.decode(result, (bool)))) {
             return _refuse(i, Refusal.TargetRefused);
@@ -229,8 +262,9 @@ contract Router is ReentrancyGuard {
             uint256 used = gasStart - gasleft() + GAS_OVERHEAD;
             uint256 cap = targetGas + GAS_OVERHEAD;
             // Router overhead is metered too; never charge more than the ceiling checked above.
-            gasFee = fees.gasFee((used > cap ? cap : used) * tx.gasprice);
-            if (gasFee > 0) usdt.safeTransferFrom(i.merchant, fees.recipient(), gasFee);
+            address recipient;
+            (gasFee, recipient) = fees.gasQuote((used > cap ? cap : used) * tx.gasprice);
+            if (gasFee > 0) usdt.safeTransferFrom(i.merchant, recipient, gasFee);
         }
         emit Executed(i.signer, i.merchant, i.nonce, i.target, gasFee);
         return (true, result);

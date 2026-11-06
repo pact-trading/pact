@@ -313,8 +313,7 @@ contract RouterGasTest is PactSuite {
         assertTrue(executed);
         assertEq(token.balanceOf(payer), 9_500_000);
         assertTrue(router.usedNonces(merchant, 2));
-        (,,, uint256 captured, uint256 refunded,,,,) = escrow.payments(paymentId);
-        assertEq(captured, 1_000_000);
-        assertEq(refunded, 500_000);
+        assertEq(escrow.payment(paymentId).captured, 1_000_000);
+        assertEq(escrow.payment(paymentId).refunded, 500_000);
     }
 }

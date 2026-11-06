@@ -31,8 +31,7 @@ contract SubscriptionV2Test is PactSuite {
     }
 
     function cancelled(bytes32 id) internal view returns (bool) {
-        (,,,,,,,,, bool value) = subs.subscriptions(id);
-        return value;
+        return subs.subscription(id).cancelled;
     }
 
     function execute(bytes memory data, uint256 nonce, uint256 key) internal returns (bool ok) {
@@ -65,7 +64,7 @@ contract SubscriptionV2Test is PactSuite {
         bytes32 id = keccak256(abi.encode(payer, uint256(0), address(subs)));
         uint256 beforePayer = token.balanceOf(payer);
         vm.expectEmit(true, false, false, true, address(subs));
-        emit SubscriptionManagerV2.Charged(id, 2_000_000, 1, FEE);
+        emit SubscriptionManagerV2.Charged(id, 2_000_000, 1, FEE, uint64(block.timestamp + 1 days), relayer);
         assertTrue(execute(abi.encodeCall(subs.charge, (id, 2_000_000)), 1, MERCHANT_KEY));
         assertEq(token.balanceOf(payer), beforePayer - 2_000_000);
         assertEq(token.balanceOf(merchant), 100_000_000 + 2_000_000 - FEE);
