@@ -15,7 +15,7 @@ trap 'rm -f "$list"' EXIT
   git -C "$root" ls-files --cached --others --exclude-standard -- \
     package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json apps/api packages \
     ':(glob)apps/*/package.json' ':(glob)examples/*/package.json'
-  for name in GasTank Router PaymentEscrow SubscriptionManager SubscriptionManagerV2 SponsoredApprover X402AccountFactory X402AgentAccount InvoiceReceivables InvestorRegistry; do
+  for name in FeeSchedule Router PaymentEscrow SubscriptionManagerV2 X402AccountFactory X402AgentAccount InvoiceReceivables InvestorRegistry; do
     echo "contracts/out/$name.sol/$name.json"
   done
 } | grep -vE '(^|/)\.env|\.sqlite' | while read -r f; do [ -f "$root/$f" ] && echo "$f"; done > "$list"

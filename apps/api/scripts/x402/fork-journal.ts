@@ -149,7 +149,7 @@ try {
 
   // One real ViemChain signer/writer, used by BOTH reservation and settlement adapters.
   // Fixture-only owner/admin writes above use a distinct synthetic owner, never this relayer.
-  const addresses = { router: EXACT, escrow: EXACT, subscription: EXACT, gasTank: EXACT }; // Unused domain addresses; x402 transport never calls them.
+  const addresses = { router: EXACT, escrow: EXACT, subscription: EXACT, fees: EXACT }; // Unused domain addresses; x402 transport never calls them.
   let viemChain = new ViemChain(url, relayerKey, addresses);
   const gasPrice = await pub.getGasPrice();
   assert(gasPrice > 0n && gasPrice <= 100_000_000_000n);

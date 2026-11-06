@@ -181,17 +181,13 @@ const apiEnv = {
   ROUTER_ADDRESS: deployment.contracts.router,
   ESCROW_ADDRESS: deployment.contracts.escrow,
   SUBSCRIPTION_ADDRESS: deployment.contracts.subscription,
-  GAS_TANK_ADDRESS: deployment.contracts.gasTank,
-  SUBSCRIPTION_VERSION: '1',
-  RENEWALS: 'keeper',
+  FEE_SCHEDULE_ADDRESS: deployment.contracts.fees,
   DEPLOYMENT_BLOCK: deployment.deploymentBlock,
   CONFIRMATIONS: '1',
   RELAYER_MIN_AMOUNT_MINOR: '1000000',
   // About 25 sponsored calls a minute in total, and 8 per merchant, at Whitechain's 5 gwei floor.
   RELAYER_MAX_SPEND_PER_MINUTE_WEI: '100000000000000000',
   RELAYER_MAX_SPEND_PER_MERCHANT_PER_MINUTE_WEI: '30000000000000000',
-  CHECKOUT_APPROVAL_ENABLED: 'true',
-  SPONSORED_APPROVER_RUNTIME_HASH: deployment.sponsoredApproverRuntimeHash,
   ...(deployment.x402
     ? { X402_FACTORY_ADDRESS: deployment.x402.factory, X402_RUNTIME_HASHES: JSON.stringify(deployment.x402.runtimeHashes) }
     : {}),

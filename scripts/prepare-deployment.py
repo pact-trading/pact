@@ -13,11 +13,14 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 RPC = os.environ.get('WHITECHAIN_RPC', 'https://rpc.testnet.whitechain.io')
 DEPLOYER = os.environ.get('DEPLOYER_ADDRESS', '0xC0DFd2a61DF78dF2e8b491a90e3765Fbf480689a')
-FEE_VAULT = os.environ.get('FEE_VAULT', DEPLOYER)
-KEEPER = os.environ.get('KEEPER', '0x59Ca3DA1771d19d27724a713F3363eFbF0a714A3')
-for value in (DEPLOYER, FEE_VAULT, KEEPER):
+# The relayer receives every fee and keeps the FeeSchedule's WBT price; the keeper renews subscriptions.
+RELAYER = os.environ.get('RELAYER', '0x59Ca3DA1771d19d27724a713F3363eFbF0a714A3')
+KEEPER = os.environ.get('KEEPER', RELAYER)
+for value in (DEPLOYER, RELAYER, KEEPER):
     if not re.fullmatch(r'0x[0-9a-fA-F]{40}', value) or int(value, 16) == 0:
         raise SystemExit('Expected nonzero public role addresses')
+# The WWBT/USDT pool (Uniswap v3, 0.3%) the FeeSchedule's starting WBT price is read from.
+POOL = '0x5645101Ca8d2F7BaBC27b10359555767a1BdF999'
 
 
 def rpc(method, params):
@@ -39,6 +42,14 @@ nonce = int(rpc('eth_getTransactionCount', [DEPLOYER, hex(block)]), 16)
 pending_nonce = int(rpc('eth_getTransactionCount', [DEPLOYER, 'pending']), 16)
 if nonce != pending_nonce:
     raise SystemExit('Deployer nonce changed or has pending transactions; choose a fresh fork block')
+if 'USDT_PER_WBT' in os.environ:
+    USDT_PER_WBT = int(os.environ['USDT_PER_WBT'])
+else:
+    # slot0().sqrtPriceX96 with WWBT as token0: USDT base units per 1 WBT = sqrtP^2 * 1e18 / 2^192.
+    sqrt_price = int(rpc('eth_call', [{'to': POOL, 'data': '0x3850c7bd'}, hex(block)])[2:66], 16)
+    USDT_PER_WBT = sqrt_price * sqrt_price * 10**18 // 2**192
+if not 1_000_000 <= USDT_PER_WBT <= 100_000_000_000:
+    raise SystemExit(f'Implausible WBT price: {USDT_PER_WBT} USDT base units per WBT')
 
 output = Path(tempfile.mkdtemp(prefix='gol-deploy-preview-'))
 project = output / 'contracts'
@@ -60,7 +71,7 @@ for old, new in [
 (project / 'script/Deploy.s.sol').write_text(preview)
 
 env = {k: v for k, v in os.environ.items() if 'PRIVATE_KEY' not in k and 'MNEMONIC' not in k and not k.startswith('FOUNDRY_')}
-env.update(DEPLOYER_ADDRESS=DEPLOYER, FEE_VAULT=FEE_VAULT, KEEPER=KEEPER)
+env.update(DEPLOYER_ADDRESS=DEPLOYER, RELAYER=RELAYER, KEEPER=KEEPER, USDT_PER_WBT=str(USDT_PER_WBT))
 command = ['forge', 'script', 'script/Deploy.s.sol:Deploy', '--rpc-url', RPC,
            '--fork-block-number', str(block), '--legacy']
 print(f'Keyless deployment rehearsal at block {block}; output: {output}', flush=True)
@@ -71,11 +82,12 @@ if result.returncode:
 
 raw = json.loads((project / 'broadcast/Deploy.s.sol/1874/dry-run/run-latest.json').read_text())
 transactions = raw['transactions']
+# FeeSchedule, Router, PaymentEscrow and SubscriptionManagerV2, then the 11 Router allowlist entries.
 if len(transactions) != 15 or len([t for t in transactions if t['transactionType'] == 'CREATE']) != 4:
     raise SystemExit('Unexpected deployment transaction plan; review before approval')
 summary = {
     'status': 'simulated_only_not_deployed', 'chainId': 1874, 'forkBlock': block,
-    'deployer': DEPLOYER, 'feeVault': FEE_VAULT, 'keeper': KEEPER,
+    'deployer': DEPLOYER, 'relayer': RELAYER, 'feeRecipient': RELAYER, 'keeper': KEEPER, 'usdtPerWbt': str(USDT_PER_WBT),
     'deployerNonce': nonce, 'pendingNonce': pending_nonce,
     'deployerBalanceWei': str(int(rpc('eth_getBalance', [DEPLOYER, hex(block)]), 16)),
     'deployScriptSha256': hashlib.sha256(original.encode()).hexdigest(),

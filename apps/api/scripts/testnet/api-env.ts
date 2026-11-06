@@ -28,6 +28,7 @@ const keys = readEnvFile(args.keys!);
 const privy = readEnvFile(args.privy!);
 const relayerKey: Hex = (() => { try { return privateKey(keys, 'RELAYER_PRIVATE_KEY'); } catch { return fail('RELAYER_PRIVATE_KEY is missing or malformed'); } })();
 if (privateKeyToAccount(relayerKey).address.toLowerCase() !== deployment.accounts.keeper.toLowerCase()) fail('The relayer key is not the keeper this suite was deployed with');
+if (!deployment.contracts.fees) fail('The deployment record has no FeeSchedule: it predates fees taken from the payment. Deploy a fresh suite.');
 if (!privy.PRIVY_APP_ID || !privy.PRIVY_APP_SECRET) fail('PRIVY_APP_ID and PRIVY_APP_SECRET are required: on the testnet customers sign in with Privy');
 const origin = args['web-origin']!.replace(/\/$/, '');
 if (!/^https?:\/\/[^/]+$/.test(origin)) fail('--web-origin must be an origin, like https://pay.pactagent.app');
@@ -45,17 +46,16 @@ const env: Record<string, string> = {
   ROUTER_ADDRESS: deployment.contracts.router,
   ESCROW_ADDRESS: deployment.contracts.escrow,
   SUBSCRIPTION_ADDRESS: deployment.contracts.subscription,
-  GAS_TANK_ADDRESS: deployment.contracts.gasTank,
-  SUBSCRIPTION_VERSION: '1',
-  RENEWALS: 'keeper',
+  FEE_SCHEDULE_ADDRESS: deployment.contracts.fees,
   DEPLOYMENT_BLOCK: deployment.deploymentBlock,
   CONFIRMATIONS: '2',
   RELAYER_MIN_AMOUNT_MINOR: deployment.routerLimits.minAmount,
   // About 25 sponsored calls a minute in total, and 8 per merchant, at Whitechain's 5 gwei floor.
   RELAYER_MAX_SPEND_PER_MINUTE_WEI: '100000000000000000',
   RELAYER_MAX_SPEND_PER_MERCHANT_PER_MINUTE_WEI: '30000000000000000',
-  CHECKOUT_APPROVAL_ENABLED: 'true',
-  SPONSORED_APPROVER_RUNTIME_HASH: deployment.sponsoredApproverRuntimeHash,
+  // Gas Pact absorbs for calls that move no money to a merchant: 0.05 WBT a day, plus 25% of its fees.
+  SPONSORSHIP_STARTER_WEI_PER_DAY: '50000000000000000',
+  SPONSORSHIP_REVENUE_SHARE_BPS: '2500',
   X402_FACTORY_ADDRESS: deployment.x402.factory,
   X402_RUNTIME_HASHES: JSON.stringify(deployment.x402.runtimeHashes),
   // Per-merchant daily x402 gas, counted at worst case: about 50 paid calls a day, ~0.05 WBT actually spent.

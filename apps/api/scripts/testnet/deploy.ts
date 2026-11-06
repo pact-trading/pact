@@ -1,6 +1,7 @@
 // Deploys the Pact suite to Whitechain Sepolia (chain 1874): the same contracts and settings as the
 // local fork (scripts/live/deploy.ts), signed by the deployer in a private env file. The relayer
-// address from that file becomes the SubscriptionManager keeper; the fee vault defaults to the deployer.
+// address from that file becomes the SubscriptionManager keeper, the FeeSchedule's price keeper and,
+// until a fee vault exists, its fee recipient. The WBT price starts at the testnet pool's.
 //
 // 1. Rehearse on a local Anvil fork of the testnet. Sends nothing to the testnet:
 //      anvil --fork-url https://rpc.testnet.whitechain.io --port 8546 --hardfork prague
@@ -20,13 +21,15 @@ import {
   parseAbi, parseEther, type Abi, type Address, type Hex,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { APPROVER, USDT } from '../../src/approval.js';
+import { USDT } from '../../src/token.js';
+import { ALLOWLIST, INITIAL_TERMS, ROUTER_LIMITS, allowFlags, termsTuple } from '../../src/suite.js';
+import { readPoolPrice } from '../../src/treasury.js';
 import { privateKey, readEnvFile } from './keys.js';
 
 const { values: args } = parseArgs({
   options: {
     rpc: { type: 'string' }, keys: { type: 'string' }, out: { type: 'string' }, rehearsal: { type: 'string' },
-    'max-fee-wbt': { type: 'string' }, 'fee-vault': { type: 'string' }, execute: { type: 'boolean', default: false },
+    'max-fee-wbt': { type: 'string' }, 'fee-recipient': { type: 'string' }, 'usdt-per-wbt': { type: 'string' }, execute: { type: 'boolean', default: false },
   },
 });
 const fail = (message: string): never => { console.error(`[deploy] ${message}`); process.exit(1); };
@@ -47,7 +50,7 @@ const env = readEnvFile(args.keys!);
 const key = (name: string): Hex => { try { return privateKey(env, name); } catch { return fail(`${name} is missing or malformed in ${args.keys}`); } };
 const deployer = privateKeyToAccount(key('DEPLOYER_PRIVATE_KEY'));
 const relayer = privateKeyToAccount(key('RELAYER_PRIVATE_KEY')).address;
-const feeVault = (args['fee-vault'] ?? deployer.address) as Address;
+const feeRecipient = (args['fee-recipient'] ?? relayer) as Address;
 if (deployer.address.toLowerCase() === relayer.toLowerCase()) fail('Deployer and relayer must be different wallets');
 
 const artifact = (name: string) => {
@@ -73,14 +76,13 @@ const runtimeMatches = (name: string, code: Hex) => {
   };
   return executable(code) === executable(runtime.object);
 };
-const sources = ['GasTank', 'Router', 'PaymentEscrow', 'SubscriptionManager', 'SponsoredContext', 'SponsoredApprover', 'X402AccountFactory', 'X402AgentAccount'];
+const sources = ['FeeSchedule', 'Router', 'PaymentEscrow', 'SubscriptionManagerV2', 'SponsoredContext', 'Signatures', 'X402AccountFactory', 'X402AgentAccount'];
 const sourceSha256 = Object.fromEntries(sources.map(name => [`src/${name}.sol`, createHash('sha256').update(readFileSync(`${root}contracts/src/${name}.sol`)).digest('hex')]));
 
-// Chain preconditions: token, sponsored approver and the pinned x402 runtimes.
-const erc20 = parseAbi(['function decimals() view returns (uint8)']);
+// Chain preconditions: the token (with its EIP-2612 permit) and the pinned x402 runtimes.
+const erc20 = parseAbi(['function decimals() view returns (uint8)', 'function DOMAIN_SEPARATOR() view returns (bytes32)']);
 if (await pub.readContract({ address: USDT, abi: erc20, functionName: 'decimals' }) !== 6) fail('USDT does not report 6 decimals');
-const approverCode = await pub.getCode({ address: APPROVER });
-if (!approverCode || !runtimeMatches('SponsoredApprover', approverCode)) fail('SponsoredApprover runtime differs from the compiled source');
+await pub.readContract({ address: USDT, abi: erc20, functionName: 'DOMAIN_SEPARATOR' }).catch(() => fail('USDT has no EIP-2612 permit'));
 const reference = JSON.parse(readFileSync(`${root}docs/x402/whitechain-readonly.json`, 'utf8'));
 const runtimeHashes: Record<string, Hex> = Object.fromEntries(Object.entries(reference.runtimes as Record<string, { hash: Hex | null }>).filter(([, v]) => v?.hash).map(([k, v]) => [k, v.hash as Hex]));
 for (const [address, hash] of Object.entries(runtimeHashes)) {
@@ -95,23 +97,28 @@ runtimeHashes[UPTO] = reference.uptoDeployment.expectedRuntimeHash;
 const startNonce = await pub.getTransactionCount({ address: deployer.address, blockTag: 'latest' });
 if (startNonce !== await pub.getTransactionCount({ address: deployer.address, blockTag: 'pending' })) fail('Deployer has pending transactions; wait for them first');
 const at = (index: number) => getContractAddress({ from: deployer.address, nonce: BigInt(startNonce + index) });
-const contracts = { gasTank: at(0), router: at(1), escrow: at(3), subscription: at(4) };
-const limits = { minAmount: 1_000_000n, usdtPerWBT: 1_000_000n, maxPayerCallsPerDay: 40, maxGasPerCall: 1_000_000, maxGasPrice: 100_000_000_000n };
+const contracts = { fees: at(0), router: at(1), escrow: at(2), subscription: at(3) };
+const limits = ROUTER_LIMITS;
+// The rehearsal records the price it used; the testnet run uses exactly that, so the plan matches.
+const priorRehearsal = args.rehearsal ? JSON.parse(readFileSync(args.rehearsal, 'utf8')) : undefined;
+const usdtPerWbt = BigInt(args['usdt-per-wbt'] ?? priorRehearsal?.usdtPerWbt ?? await readPoolPrice(pub));
+if (usdtPerWbt <= 0n) fail('Invalid USDT per WBT');
 type Step = { label: string; to: Address | null; data: Hex };
 const create = (name: string, ctorArgs: unknown[] = []): Step => ({ label: `create ${name}`, to: null, data: encodeDeployData({ abi: artifact(name).abi, bytecode: artifact(name).bytecode, args: ctorArgs }) });
 const call = (name: string, to: Address, functionName: string, callArgs: unknown[]): Step => ({ label: `${name}.${functionName}${functionName === 'setAllowed' ? ` ${callArgs[1]}` : ''}`, to, data: encodeFunctionData({ abi: artifact(name).abi, functionName, args: callArgs }) });
-const escrowFns = ['authorize', 'capture', 'charge', 'void', 'reclaim', 'refund'];
-const subscriptionFns = ['subscribe', 'charge', 'cancel', 'replace'];
+const targetOf = { escrow: ['PaymentEscrow', contracts.escrow], subscription: ['SubscriptionManagerV2', contracts.subscription] } as const;
+const suiteEntries = ALLOWLIST.filter(entry => entry.contract !== 'receivables'); // Added by deploy-financing.ts.
 const plan: Step[] = [
-  create('GasTank'),
-  create('Router', [USDT, contracts.gasTank, feeVault]),
-  call('GasTank', contracts.gasTank, 'setRouter', [contracts.router]),
-  create('PaymentEscrow', [USDT, contracts.router]),
-  create('SubscriptionManager', [USDT, contracts.router, relayer]),
-  ...escrowFns.map(fn => call('Router', contracts.router, 'setAllowed', [contracts.escrow, selector('PaymentEscrow', fn), true, false])),
-  ...subscriptionFns.map(fn => call('Router', contracts.router, 'setAllowed', [contracts.subscription, selector('SubscriptionManager', fn), true, fn === 'charge'])),
+  create('FeeSchedule', [feeRecipient, relayer, usdtPerWbt, termsTuple(INITIAL_TERMS)]),
+  create('Router', [USDT, contracts.fees]),
+  create('PaymentEscrow', [USDT, contracts.router, contracts.fees]),
+  create('SubscriptionManagerV2', [USDT, contracts.router, relayer, contracts.fees]),
+  ...suiteEntries.map(entry => {
+    const [name, address] = targetOf[entry.contract as 'escrow' | 'subscription'];
+    return call('Router', contracts.router, 'setAllowed', [address, selector(name, entry.fn), ...allowFlags(entry)]);
+  }),
   // Same as the local fork: a higher per-payer daily count than the default 10, so one tester can try every flow.
-  call('Router', contracts.router, 'setLimits', [limits.minAmount, limits.usdtPerWBT, limits.maxPayerCallsPerDay, limits.maxGasPerCall, limits.maxGasPrice]),
+  call('Router', contracts.router, 'setLimits', [limits.minAmount, limits.maxPayerCallsPerDay, limits.maxGasPerCall, limits.maxGasPrice]),
   ...(uptoMissing ? [{ label: 'create canonical x402 upto (CREATE2)', to: reference.uptoDeployment.to as Address, data: reference.uptoDeployment.data as Hex }] : []),
 ];
 const factory = at(plan.length);
@@ -122,9 +129,9 @@ for (const address of [...Object.values(contracts), factory]) if (await pub.getC
 let gasLimits: bigint[];
 if (local) gasLimits = plan.map(() => 10_000_000n);
 else {
-  const rehearsal = JSON.parse(readFileSync(args.rehearsal!, 'utf8'));
+  const rehearsal = priorRehearsal;
   if (rehearsal.status !== 'verified' || rehearsal.mode !== 'rehearsal') fail('Rehearsal did not complete and verify');
-  if (!same(rehearsal.accounts.deployer, deployer.address) || !same(rehearsal.accounts.relayer, relayer) || !same(rehearsal.accounts.feeVault, feeVault)) fail('Rehearsal used different accounts');
+  if (!same(rehearsal.accounts.deployer, deployer.address) || !same(rehearsal.accounts.relayer, relayer) || !same(rehearsal.accounts.feeRecipient, feeRecipient)) fail('Rehearsal used different accounts');
   if (rehearsal.startNonce !== startNonce) fail(`Deployer nonce moved since the rehearsal (${rehearsal.startNonce} → ${startNonce}); rehearse again`);
   if (rehearsal.steps.length !== plan.length || plan.some((step, i) => rehearsal.steps[i].dataHash !== keccak256(step.data) || String(rehearsal.steps[i].to) !== String(step.to))) fail('Plan differs from the rehearsal; rehearse again');
   gasLimits = rehearsal.steps.map((step: { gasUsed: string }) => (BigInt(step.gasUsed) * 125n) / 100n + 5_000n);
@@ -141,10 +148,11 @@ if (!local && balance < plannedFee + l1Reserve) fail(`Deployer holds ${formatEth
 const record = {
   status: 'broadcasting', mode: local ? 'rehearsal' : 'testnet', chainId: 1874, rpcUrl: local ? 'local-fork' : args.rpc,
   startedAt: new Date().toISOString(), completedAt: null as string | null,
-  accounts: { deployer: deployer.address, relayer, keeper: relayer, feeVault },
-  contracts: { ...contracts, usdt: USDT, sponsoredApprover: APPROVER },
+  accounts: { deployer: deployer.address, relayer, keeper: relayer, priceKeeper: relayer, feeRecipient },
+  contracts: { ...contracts, usdt: USDT },
   x402: { factory, upto: UPTO, uptoDeployed: uptoMissing, runtimeHashes },
-  sponsoredApproverRuntimeHash: keccak256(approverCode!),
+  feeTerms: { version: 1, ...JSON.parse(JSON.stringify(termsTuple(INITIAL_TERMS), (_, v) => typeof v === 'bigint' ? String(v) : v)) },
+  usdtPerWbt: String(usdtPerWbt),
   routerLimits: Object.fromEntries(Object.entries(limits).map(([k, v]) => [k, String(v)])),
   startNonce, gasPriceWei: String(gasPrice), maxFeeWei: String(maxFee), plannedMaxFeeWei: String(plannedFee), startingBalanceWei: String(balance),
   deploymentBlock: null as string | null, totalFeeWei: '0', sourceSha256,
@@ -185,22 +193,26 @@ try {
   // Verify what is on chain, not what was sent.
   const read = (address: Address, name: string, functionName: string, callArgs: unknown[] = []) => pub.readContract({ address, abi: artifact(name).abi, functionName, args: callArgs });
   const checks: Array<[Address, string, string, unknown[], unknown]> = [
-    [contracts.gasTank, 'GasTank', 'owner', [], deployer.address], [contracts.gasTank, 'GasTank', 'router', [], contracts.router],
-    [contracts.router, 'Router', 'owner', [], deployer.address], [contracts.router, 'Router', 'usdt', [], USDT],
-    [contracts.router, 'Router', 'gasTank', [], contracts.gasTank], [contracts.router, 'Router', 'feeVault', [], feeVault],
-    [contracts.escrow, 'PaymentEscrow', 'usdt', [], USDT], [contracts.escrow, 'PaymentEscrow', 'router', [], contracts.router],
-    [contracts.subscription, 'SubscriptionManager', 'owner', [], deployer.address], [contracts.subscription, 'SubscriptionManager', 'usdt', [], USDT],
-    [contracts.subscription, 'SubscriptionManager', 'router', [], contracts.router], [contracts.subscription, 'SubscriptionManager', 'keeper', [], relayer],
+    [contracts.fees, 'FeeSchedule', 'owner', [], deployer.address], [contracts.fees, 'FeeSchedule', 'recipient', [], feeRecipient],
+    [contracts.fees, 'FeeSchedule', 'priceKeeper', [], relayer], [contracts.fees, 'FeeSchedule', 'usdtPerWBT', [], usdtPerWbt],
+    [contracts.fees, 'FeeSchedule', 'latestVersion', [], 1n], [contracts.fees, 'FeeSchedule', 'terms', [1], termsTuple(INITIAL_TERMS)],
+    [contracts.router, 'Router', 'owner', [], deployer.address], [contracts.router, 'Router', 'usdt', [], USDT], [contracts.router, 'Router', 'fees', [], contracts.fees],
+    [contracts.escrow, 'PaymentEscrow', 'usdt', [], USDT], [contracts.escrow, 'PaymentEscrow', 'router', [], contracts.router], [contracts.escrow, 'PaymentEscrow', 'fees', [], contracts.fees],
+    [contracts.subscription, 'SubscriptionManagerV2', 'owner', [], deployer.address], [contracts.subscription, 'SubscriptionManagerV2', 'usdt', [], USDT],
+    [contracts.subscription, 'SubscriptionManagerV2', 'router', [], contracts.router], [contracts.subscription, 'SubscriptionManagerV2', 'keeper', [], relayer],
+    [contracts.subscription, 'SubscriptionManagerV2', 'fees', [], contracts.fees],
     ...Object.entries(limits).map(([fn, value]) => [contracts.router, 'Router', fn, [], BigInt(value)] as [Address, string, string, unknown[], unknown]),
-    ...escrowFns.map(fn => [contracts.router, 'Router', 'allowed', [contracts.escrow, selector('PaymentEscrow', fn)], [true, false]] as [Address, string, string, unknown[], unknown]),
-    ...subscriptionFns.map(fn => [contracts.router, 'Router', 'allowed', [contracts.subscription, selector('SubscriptionManager', fn)], [true, fn === 'charge']] as [Address, string, string, unknown[], unknown]),
+    ...suiteEntries.map(entry => {
+      const [name, address] = targetOf[entry.contract as 'escrow' | 'subscription'];
+      return [contracts.router, 'Router', 'allowed', [address, selector(name, entry.fn)], [...allowFlags(entry)]] as [Address, string, string, unknown[], unknown];
+    }),
   ];
   for (const [address, name, fn, callArgs, wanted] of checks) {
     const got = await read(address, name, fn, callArgs);
     const norm = (v: unknown) => JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? String(x) : typeof x === 'string' ? x.toLowerCase() : x));
     if (norm(typeof got === 'number' ? BigInt(got) : got) !== norm(wanted)) throw new Error(`${name}.${fn} is ${norm(got)}, expected ${norm(wanted)}`);
   }
-  for (const [name, address] of [['GasTank', contracts.gasTank], ['Router', contracts.router], ['PaymentEscrow', contracts.escrow], ['SubscriptionManager', contracts.subscription], ['X402AccountFactory', factory]] as const) {
+  for (const [name, address] of [['FeeSchedule', contracts.fees], ['Router', contracts.router], ['PaymentEscrow', contracts.escrow], ['SubscriptionManagerV2', contracts.subscription], ['X402AccountFactory', factory]] as const) {
     const code = await pub.getCode({ address });
     if (!code || !runtimeMatches(name, code)) throw new Error(`${name} runtime differs from the compiled source`);
   }

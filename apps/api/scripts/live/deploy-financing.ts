@@ -1,12 +1,14 @@
 // Adds invoice financing (InvestorRegistry and InvoiceReceivables) to an existing suite on a LOCAL Anvil
-// fork, and records it in the suite's deployment file. Nothing else is redeployed: the Router gains one
-// allowlist entry, InvoiceReceivables.pay, so customers pay financed invoices through it as usual.
+// fork, and records it in the suite's deployment file. Nothing else is redeployed: the Router gains the
+// receivables entries, `pay` (customers pay financed invoices through it as usual) and `buyBack` (the
+// merchant signs it and pays its gas in USDT). The sale fee goes to the FeeSchedule's recipient.
 //   tsx scripts/live/deploy-financing.ts <rpcUrl> <deploymentFile>
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createPublicClient, createWalletClient, defineChain, getFunctionSelector, http, type Abi, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { FINANCING_TERMS, receivablesConfig } from '../../src/financing/terms.js';
+import { ALLOWLIST, allowFlags } from '../../src/suite.js';
 
 const [rpcUrl, deploymentFile] = process.argv.slice(2);
 if (!rpcUrl || !deploymentFile) throw new Error('usage: deploy-financing.ts <rpcUrl> <deploymentFile>');
@@ -38,15 +40,17 @@ const router = artifact('Router');
 const routerAddress = deployment.contracts.router as Address;
 const owner = await pub.readContract({ address: routerAddress, abi: router.abi, functionName: 'owner' }) as Address;
 if (owner.toLowerCase() !== deployer.address.toLowerCase()) throw new Error('The deployment key does not own the Router');
-const feeVault = await pub.readContract({ address: routerAddress, abi: router.abi, functionName: 'feeVault' }) as Address;
+const fees = await pub.readContract({ address: routerAddress, abi: router.abi, functionName: 'fees' }) as Address;
 
 const registry = artifact('InvestorRegistry');
 const registryReceipt = await wait(await wallet.deployContract({ abi: registry.abi, bytecode: registry.bytecode, args: [deployer.address], gas: 3_000_000n }));
 const receivables = artifact('InvoiceReceivables');
-const config = receivablesConfig({ usdt: deployment.contracts.usdt, router: routerAddress, registry: registryReceipt.contractAddress!, feeVault });
+const config = receivablesConfig({ usdt: deployment.contracts.usdt, router: routerAddress, registry: registryReceipt.contractAddress!, fees });
 const receivablesReceipt = await wait(await wallet.deployContract({ abi: receivables.abi, bytecode: receivables.bytecode, args: [config], gas: 8_000_000n }));
-const pay = getFunctionSelector(receivables.abi.find(item => item.type === 'function' && item.name === 'pay') as never);
-await wait(await wallet.writeContract({ address: routerAddress, abi: router.abi, functionName: 'setAllowed', args: [receivablesReceipt.contractAddress!, pay, true, false], gas: 200_000n }));
+for (const entry of ALLOWLIST.filter(e => e.contract === 'receivables')) {
+  const selector = getFunctionSelector(receivables.abi.find(item => item.type === 'function' && item.name === entry.fn) as never);
+  await wait(await wallet.writeContract({ address: routerAddress, abi: router.abi, functionName: 'setAllowed', args: [receivablesReceipt.contractAddress!, selector, ...allowFlags(entry)], gas: 200_000n }));
+}
 console.info(`deployed InvestorRegistry at ${registryReceipt.contractAddress}, InvoiceReceivables at ${receivablesReceipt.contractAddress}`);
 
 deployment.financing = {
@@ -54,7 +58,7 @@ deployment.financing = {
   receivables: receivablesReceipt.contractAddress,
   deploymentBlock: registryReceipt.blockNumber.toString(),
   registryOwner: deployer.address,
-  feeVault,
+  fees,
   terms: { ...FINANCING_TERMS, minShareMinor: FINANCING_TERMS.minShareMinor.toString() },
 };
 writeFileSync(deploymentFile, `${JSON.stringify(deployment, null, 2)}\n`, { mode: 0o600 });

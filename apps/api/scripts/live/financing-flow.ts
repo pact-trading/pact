@@ -1,19 +1,17 @@
 // End-to-end invoice financing on a local fork, through the running API, with real contracts and wallets:
-//   1. a merchant lists an acknowledged invoice from its wallet;
+//   1. a merchant signs Pact's fee terms and lists an acknowledged invoice, both by signature;
 //   2. an unapproved investor is refused; a compliance officer approves two investors in the registry;
 //   3. they buy it (delivery versus payment) and one transfers part to the other;
-//   4. the customer pays through the usual gasless flow (relayed approval, Router), and the contract pays
-//      the holders straight away and returns the reserve to the merchant.
+//   4. the customer pays through the usual gasless flow (a relayed USDT permit, then the Router), and the
+//      contract pays the holders straight away and returns the reserve to the merchant, with no fee.
 // With --time-travel (an isolated stack only: it moves the fork's clock for good), a second invoice
-// defaults after its grace period, the keeper marks it, and the merchant buys it back.
+// defaults after its grace period, the keeper marks it, and the merchant buys it back by signature,
+// paying the holders and the call's gas in USDT. Nobody but Pact's relayer holds WBT.
 //
 //   pnpm live --no-web                                          (or an isolated stack, see docs/live-mode.md)
 //   API=http://127.0.0.1:3001 RPC=http://127.0.0.1:8545 tsx scripts/live/financing-flow.ts [--time-travel]
 import assert from 'node:assert/strict';
-import {
-  createPublicClient, createWalletClient, defineChain, erc20Abi, http, maxUint256, parseAbi, parseEther,
-  type Address, type Hex,
-} from 'viem';
+import { createPublicClient, defineChain, erc20Abi, http, type Address } from 'viem';
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import { createSiweMessage } from 'viem/siwe';
 
@@ -40,18 +38,6 @@ async function signIn(account: PrivateKeyAccount, email?: string) {
   const message = createSiweMessage({ ...challenge, address: account.address, version: '1', issuedAt: new Date() } as never);
   return (await call('/v1/auth/wallet/verify', '', { message, signature: await account.signMessage({ message }), email })).token as string;
 }
-/** Sends prepared transactions from a wallet, each confirmed before the next, like the browser does. */
-async function send(account: PrivateKeyAccount, transactions: Array<{ to: Address; data: Hex }>) {
-  const wallet = createWalletClient({ account, chain, transport: http(RPC) });
-  const hashes: Hex[] = [];
-  for (const tx of transactions) {
-    const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data });
-    const receipt = await pub.waitForTransactionReceipt({ hash });
-    assert.equal(receipt.status, 'success', `transaction reverted: ${hash}`);
-    hashes.push(hash);
-  }
-  return hashes;
-}
 const revive = (typed: Body) => {
   const fields = typed.types[typed.primaryType] as Array<{ name: string; type: string }>;
   const message = Object.fromEntries(fields.map(f => [f.name, /^u?int/.test(f.type) ? BigInt(typed.message[f.name]) : typed.message[f.name]]));
@@ -59,7 +45,7 @@ const revive = (typed: Body) => {
   delete types.EIP712Domain;
   return { domain: { ...typed.domain, chainId: Number(typed.domain.chainId) }, types, primaryType: typed.primaryType, message } as never;
 };
-/** Signs every prepared EIP-712 message (an order, then any USDT permit), as the browser wallet does. */
+/** Signs every prepared EIP-712 message (permits and orders, in their order), as the browser wallet does. */
 const signAll = (account: PrivateKeyAccount, typedData: Body[]) => Promise.all(typedData.map(t => account.signTypedData(revive(t))));
 const usdtOf = (address: Address) => pub.readContract({ address: network.contracts.usdt, abi: erc20Abi, functionName: 'balanceOf', args: [address] });
 async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, what: string, seconds = 90): Promise<T> {
@@ -85,18 +71,14 @@ const [merchantToken, customerToken, aliceToken, bobToken, carolToken, officerTo
   signIn(merchant), signIn(customer, email), signIn(alice), signIn(bob), signIn(carol), signIn(officer),
 ]);
 await call('/v1/auth/merchant', merchantToken, {});
-// Investors and the officer get no WBT at all: they only sign, and Pact's relayer pays their gas.
-for (const [token, address, usdt, wbt] of [[merchantToken, merchant.address, '50', '1'], [customerToken, customer.address, '60', ''], [aliceToken, alice.address, '100', ''], [bobToken, bob.address, '100', ''], [carolToken, carol.address, '20', '']] as const)
-  await call('/v1/dev/faucet', token, { address, usdt: usdt || undefined, wbt: wbt || undefined });
-// The merchant's usual live setup: gas tank, daily cap, the Router's USDT fee allowance.
-const tankAbi = parseAbi(['function deposit(address) payable', 'function setDailyCap(uint256)']);
-const merchantWallet = createWalletClient({ account: merchant, chain, transport: http(RPC) });
-for (const hash of [
-  await merchantWallet.writeContract({ address: network.contracts.gasTank, abi: tankAbi, functionName: 'deposit', args: [merchant.address], value: parseEther('0.3') }),
-  await merchantWallet.writeContract({ address: network.contracts.gasTank, abi: tankAbi, functionName: 'setDailyCap', args: [parseEther('0.3')] }),
-  await merchantWallet.writeContract({ address: network.contracts.usdt, abi: erc20Abi, functionName: 'approve', args: [network.contracts.router, maxUint256] }),
-]) assert.equal((await pub.waitForTransactionReceipt({ hash })).status, 'success');
-step('merchant, customer, investors and officer are set up');
+// Nobody gets WBT: merchant, customer, investors and officer only sign, and Pact's relayer pays the gas.
+for (const [token, address, usdt] of [[merchantToken, merchant.address, '50'], [customerToken, customer.address, '60'], [aliceToken, alice.address, '100'], [bobToken, bob.address, '100'], [carolToken, carol.address, '20']] as const)
+  await call('/v1/dev/faucet', token, { address, usdt });
+// The merchant's whole setup: sign Pact's fee terms, which Pact's relayer submits.
+const terms = await call('/v1/fees/terms', merchantToken);
+await call('/v1/fees/terms/accept', merchantToken, { version: terms.version, deadline: terms.deadline, signature: await merchant.signTypedData(revive(terms.typedData)) });
+await until(() => call('/v1/fees', merchantToken), f => f.terms.acceptedVersion === terms.version, 'the fee terms');
+step('merchant signed the fee terms; customer, investors and officer are set up');
 
 /** An invoice the customer acknowledged ("I owe this invoice"), due in `days` days. */
 async function acknowledgedInvoice(amount: string, days: number) {
@@ -107,7 +89,7 @@ async function acknowledgedInvoice(amount: string, days: number) {
 }
 async function list(invoiceId: string) {
   const prepared = await call(`/v1/financing/invoices/${invoiceId}/list`, merchantToken, {});
-  return call(`/v1/financing/invoices/${invoiceId}/transactions`, merchantToken, { hashes: await send(merchant, prepared.transactions) });
+  return call(`/v1/financing/invoices/${invoiceId}/list/relay`, merchantToken, { order: prepared.order, signatures: await signAll(merchant, prepared.typedData) });
 }
 async function approve(investor: PrivateKeyAccount, token: string, organization: string) {
   await call('/v1/investor/me/application', token, { name: `${organization} desk`, organization, email: `${organization.split(' ')[0].toLowerCase()}@fund.test`, region: 'GB' });
@@ -170,8 +152,8 @@ await call('/v1/compliance/orders/cancel/relay', officerToken, { order: cancelDe
 assert.equal((await request(`/v1/compliance/investors/${carol.address}/relay`, officerToken, { order: unsentDecision.order, signatures: unsentDecisionSignatures })).body.error.code, 'invalid_signature', 'a cancelled decision cannot run');
 assert.equal((await call('/v1/compliance/registry', officerToken)).investors.find((i: Body) => i.address === carol.address.toLowerCase()).approval.status, 'pending');
 step('signed orders that were never sent were cancelled; the contracts refuse them');
-for (const who of [alice, bob, officer]) assert.equal(await pub.getBalance({ address: who.address }), 0n, 'investors and the officer never needed gas');
-step('investors and the officer hold no WBT: they only signed, Pact paid the gas');
+for (const who of [merchant, alice, bob, officer]) assert.equal(await pub.getBalance({ address: who.address }), 0n, 'the merchant, investors and officer never needed gas');
+step('the merchant, investors and officer hold no WBT: they only signed, Pact paid the gas');
 
 // ------------------------------------------------------------------ 4. the customer pays as usual
 const [aliceBefore, bobBefore, merchantMid] = await Promise.all([usdtOf(alice.address), usdtOf(bob.address), usdtOf(merchant.address)]);
@@ -179,13 +161,9 @@ const { paymentId } = await call(`/v1/commerce/me/invoices/${invoiceId}/payments
 let readiness = await call(`/v1/commerce/me/payments/${paymentId}/readiness`, customerToken);
 assert.equal(readiness.spender.toLowerCase(), receivables.toLowerCase(), 'a financed invoice is approved to the receivables contract');
 if (readiness.status === 'needs_approval') {
-  const signature = await customer.signMessage({ message: { raw: readiness.message } });
-  const authorization = readiness.authorizationRequired ? await customer.signAuthorization({ address: readiness.delegate, chainId: 1874, nonce: Number(readiness.authorizationNonce) }) : undefined;
-  await call(`/v1/commerce/me/payments/${paymentId}/approval`, customerToken, {
-    approvalNonce: readiness.approvalNonce, deadline: readiness.deadline, signature,
-    ...(authorization ? { authorization: { address: authorization.address, chainId: authorization.chainId, nonce: authorization.nonce, r: authorization.r, s: authorization.s, yParity: authorization.yParity } } : {}),
-  });
-  readiness = await until(() => call(`/v1/commerce/me/payments/${paymentId}/readiness`, customerToken), r => r.status === 'ready', 'the relayed approval');
+  // A USDT permit: the customer signs, Pact's relayer submits it.
+  await call(`/v1/commerce/me/payments/${paymentId}/approval`, customerToken, { deadline: readiness.deadline, signature: await customer.signTypedData(revive(readiness.typedData)) });
+  readiness = await until(() => call(`/v1/commerce/me/payments/${paymentId}/readiness`, customerToken), r => r.status === 'ready', 'the relayed permit');
 }
 assert.equal(readiness.status, 'ready');
 const offer = await call(`/v1/commerce/me/payments/${paymentId}/intent`, customerToken);
@@ -197,7 +175,7 @@ assert.equal(await usdtOf(alice.address) - aliceBefore, 10n * USDT, 'Lotus Capit
 assert.equal(await usdtOf(bob.address) - bobBefore, 10n * USDT, 'Harbor Fund was paid its face value');
 const reserveBack = BigInt(repaid.reserve.releasedMinor);
 assert.ok(reserveBack > 0n);
-assert.ok(await usdtOf(merchant.address) - merchantMid > reserveBack - 1n * USDT, 'the merchant got its reserve back, less the Router fee');
+assert.equal(await usdtOf(merchant.address) - merchantMid, reserveBack, 'the merchant got its whole reserve back: a financed payment carries no fee');
 assert.equal(await usdtOf(receivables), 0n, 'nothing is left in the contract');
 const portfolio = await call('/v1/investor/portfolio', aliceToken);
 assert.equal(portfolio.totals.receivedMinor, (10n * USDT).toString());
@@ -217,11 +195,15 @@ if (timeTravel) {
   assert.equal(defaulted.frozen, true);
   const owed = BigInt(defaulted.buyBackMinor);
   assert.equal(owed, 10n * USDT + 10n * USDT / 100n - 1n * USDT, 'face value plus the 1% late fee, less the 10% reserve paid out');
-  const aliceMid = await usdtOf(alice.address);
+  const [aliceMid, merchantBeforeBuyBack] = await Promise.all([usdtOf(alice.address), usdtOf(merchant.address)]);
+  // Any USDT permits, then the Router intent: the merchant signs them all, Pact's relayer submits them.
   const buyBack = await call(`/v1/financing/invoices/${second}/buy-back`, merchantToken, {});
-  const bought = await call(`/v1/financing/invoices/${second}/transactions`, merchantToken, { hashes: await send(merchant, buyBack.transactions) });
+  const bought = await call(`/v1/financing/invoices/${second}/buy-back/relay`, merchantToken, { order: buyBack.order, signatures: await signAll(merchant, buyBack.typedData) });
   assert.equal(bought.status, 'bought_back');
   assert.equal(await usdtOf(alice.address) - aliceMid, owed);
-  step(`defaulted: reserve paid to the holder, then the merchant bought the claim back for ${Number(owed) / 1e6} USDT`);
+  const gasFee = merchantBeforeBuyBack - await usdtOf(merchant.address) - owed;
+  assert.ok(gasFee > 0n, 'the merchant paid the buy-back gas in USDT');
+  assert.equal(await pub.getBalance({ address: merchant.address }), 0n, 'still no WBT');
+  step(`defaulted: reserve paid to the holder, then the merchant bought the claim back for ${Number(owed) / 1e6} USDT plus ${Number(gasFee) / 1e6} USDT gas`);
 }
 step('OK');

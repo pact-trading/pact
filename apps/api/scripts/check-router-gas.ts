@@ -17,7 +17,7 @@ for (const [key, maxGas, refund] of [
 ] as const) {
   const data = encodeFunctionData({ abi: escrowAbi, functionName: refund ? 'refund' : 'charge', args: refund ? [id, 1_000_000n, id] : [id, address, 1_000_000n, 86400n] });
   const request: IntentRequest = {
-    intent: { signer: address, merchant: address, target: address, dataHash: keccak256(data), amount: 1_000_000n, feeUSDT: 10_000n, nonce: 1n, deadline: 867600n, maxGas },
+    intent: { signer: address, merchant: address, target: address, dataHash: keccak256(data), amount: 1_000_000n, nonce: 1n, deadline: 867600n, maxGas },
     data, signature: `0x${'11'.repeat(65)}`,
   };
   const encoded = encodeFunctionData({ abi: routerAbi, functionName: 'execute', args: [request.intent, data, request.signature] });

@@ -1,14 +1,14 @@
 // Adds invoice financing to the deployed Whitechain Sepolia suite WITHOUT redeploying it: creates
-// InvestorRegistry and InvoiceReceivables, then the Router owner allowlists InvoiceReceivables.pay so
-// customers pay financed invoices through the existing Router, gas tanks and fees. Three transactions.
+// InvestorRegistry and InvoiceReceivables (its sale fee goes to the FeeSchedule's recipient), then the
+// Router owner allowlists InvoiceReceivables.pay and .buyBack. Four transactions.
 //
 // 1. Rehearse on a local Anvil fork of the testnet. Sends nothing to the testnet:
 //      anvil --fork-url https://rpc.testnet.whitechain.io --port 8546 --hardfork prague --chain-id 1874
 //      tsx scripts/testnet/deploy-financing.ts --rpc http://127.0.0.1:8546 --keys ../../.env.testnet \
-//        --suite ../../contracts/deployment-testnet.json --out <rehearsal.json>
+//        --suite ../../contracts/deployment-testnet-<date>.json --out <rehearsal.json>
 // 2. Execute exactly the rehearsed plan on the testnet, under a fee cap:
 //      tsx scripts/testnet/deploy-financing.ts --rpc https://rpc.testnet.whitechain.io --keys ../../.env.testnet \
-//        --suite ../../contracts/deployment-testnet.json --rehearsal <rehearsal.json> --max-fee-wbt 0.05 \
+//        --suite ../../contracts/deployment-testnet-<date>.json --rehearsal <rehearsal.json> --max-fee-wbt 0.05 \
 //        --out ../../contracts/deployment-financing-testnet-<date>.json --execute
 //
 // Keys stay in memory and are never printed. The output file holds public data only, is written before
@@ -24,6 +24,7 @@ import {
 import { privateKeyToAccount } from 'viem/accounts';
 import { USDT } from '../../src/token.js';
 import { FINANCING_TERMS, receivablesConfig } from '../../src/financing/terms.js';
+import { ALLOWLIST, allowFlags } from '../../src/suite.js';
 import { privateKey, readEnvFile } from './keys.js';
 
 const { values: args } = parseArgs({
@@ -74,7 +75,8 @@ const runtimeMatches = (name: string, code: Hex) => {
 const sources = ['InvestorRegistry', 'InvoiceReceivables', 'SponsoredContext', 'Signatures'];
 const sourceSha256 = Object.fromEntries(sources.map(name => [`src/${name}.sol`, createHash('sha256').update(readFileSync(`${root}contracts/src/${name}.sol`)).digest('hex')]));
 
-// The existing suite: the Router is reused, never redeployed. Its owner (the deployer) adds one allowlist entry.
+// The existing suite: the Router is reused, never redeployed. Its owner (the deployer) adds the receivables
+// allowlist entries: `pay` (customers pay financed invoices) and `buyBack` (merchant-signed, gas on top).
 const suite = JSON.parse(readFileSync(args.suite!, 'utf8'));
 const router = suite.contracts?.router as Address;
 if (!router || suite.chainId !== 1874) fail('The suite record names no chain 1874 Router');
@@ -83,7 +85,7 @@ const readRouter = (functionName: string, callArgs: unknown[] = []) => pub.readC
 if (!(await pub.getCode({ address: router }))) fail(`No Router code at ${router}`);
 if (!same(String(await readRouter('owner')), deployer.address)) fail('The deployer key does not own the Router');
 if (!same(String(await readRouter('usdt')), USDT)) fail('The Router settles a different token');
-const feeVault = await readRouter('feeVault') as Address;
+const fees = await readRouter('fees') as Address;
 
 const startNonce = await pub.getTransactionCount({ address: deployer.address, blockTag: 'latest' });
 if (startNonce !== await pub.getTransactionCount({ address: deployer.address, blockTag: 'pending' })) fail('Deployer has pending transactions; wait for them first');
@@ -92,13 +94,13 @@ const receivables = getContractAddress({ from: deployer.address, nonce: BigInt(s
 for (const address of [registry, receivables]) if (await pub.getCode({ address })) fail(`Predicted address ${address} already has code`);
 const predecessors = (args.predecessor ?? []) as Address[];
 for (const p of predecessors) if (!/^0x[0-9a-fA-F]{40}$/.test(p) || !(await pub.getCode({ address: p }))) fail(`No receivables contract at predecessor ${p}`);
-const config = receivablesConfig({ usdt: USDT, router, registry, feeVault, predecessors });
-const pay = selector('InvoiceReceivables', 'pay');
+const config = receivablesConfig({ usdt: USDT, router, registry, fees, predecessors });
+const receivablesEntries = ALLOWLIST.filter(entry => entry.contract === 'receivables');
 type Step = { label: string; to: Address | null; data: Hex };
 const plan: Step[] = [
   { label: 'create InvestorRegistry', to: null, data: encodeDeployData({ abi: artifact('InvestorRegistry').abi, bytecode: artifact('InvestorRegistry').bytecode, args: [deployer.address] }) },
   { label: 'create InvoiceReceivables', to: null, data: encodeDeployData({ abi: artifact('InvoiceReceivables').abi, bytecode: artifact('InvoiceReceivables').bytecode, args: [config] }) },
-  { label: `Router.setAllowed ${pay}`, to: router, data: encodeFunctionData({ abi: routerAbi, functionName: 'setAllowed', args: [receivables, pay, true, false] }) },
+  ...receivablesEntries.map(entry => ({ label: `Router.setAllowed ${entry.fn}`, to: router, data: encodeFunctionData({ abi: routerAbi, functionName: 'setAllowed', args: [receivables, selector('InvoiceReceivables', entry.fn), ...allowFlags(entry)] }) })),
 ];
 
 let gasLimits: bigint[];
@@ -123,7 +125,8 @@ if (!local && balance < plannedFee + l1Reserve) fail(`Deployer holds ${formatEth
 const record = {
   status: 'broadcasting', mode: local ? 'rehearsal' : 'testnet', chainId: 1874, rpcUrl: local ? 'local-fork' : args.rpc,
   startedAt: new Date().toISOString(), completedAt: null as string | null,
-  accounts: { deployer: deployer.address, registryOwner: deployer.address, feeVault },
+  accounts: { deployer: deployer.address, registryOwner: deployer.address },
+  fees,
   contracts: { router, registry, receivables, usdt: USDT, predecessors },
   terms: { ...FINANCING_TERMS, minShareMinor: FINANCING_TERMS.minShareMinor.toString() },
   startNonce, gasPriceWei: String(gasPrice), maxFeeWei: String(maxFee), plannedMaxFeeWei: String(plannedFee), startingBalanceWei: String(balance),
@@ -167,12 +170,12 @@ try {
   const checks: Array<[Address, string, string, unknown[], unknown]> = [
     [registry, 'InvestorRegistry', 'owner', [], deployer.address], [registry, 'InvestorRegistry', 'officers', [deployer.address], true],
     [receivables, 'InvoiceReceivables', 'usdt', [], USDT], [receivables, 'InvoiceReceivables', 'router', [], router],
-    [receivables, 'InvoiceReceivables', 'registry', [], registry], [receivables, 'InvoiceReceivables', 'feeVault', [], feeVault],
+    [receivables, 'InvoiceReceivables', 'registry', [], registry], [receivables, 'InvoiceReceivables', 'fees', [], fees],
     [receivables, 'InvoiceReceivables', 'feeBps', [], t.feeBps], [receivables, 'InvoiceReceivables', 'reserveBps', [], t.reserveBps],
     [receivables, 'InvoiceReceivables', 'lateFeeBps', [], t.lateFeeBps], [receivables, 'InvoiceReceivables', 'maxDiscountBps', [], t.maxDiscountBps],
     [receivables, 'InvoiceReceivables', 'gracePeriod', [], t.gracePeriodSeconds], [receivables, 'InvoiceReceivables', 'recordPeriod', [], t.recordPeriodSeconds],
     [receivables, 'InvoiceReceivables', 'minShare', [], t.minShareMinor], [receivables, 'InvoiceReceivables', 'maxHolders', [], t.maxHolders],
-    [router, 'Router', 'allowed', [receivables, pay], [true, false]],
+    ...receivablesEntries.map(entry => [router, 'Router', 'allowed', [receivables, selector('InvoiceReceivables', entry.fn)], [...allowFlags(entry)]] as [Address, string, string, unknown[], unknown]),
     [receivables, 'InvoiceReceivables', 'predecessors', [], predecessors],
   ];
   const norm = (v: unknown) => JSON.stringify(v, (_, x) => (typeof x === 'bigint' || typeof x === 'number' ? String(x) : typeof x === 'string' ? x.toLowerCase() : x));

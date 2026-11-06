@@ -5,7 +5,7 @@ import { isAddress } from 'viem';
 
 const addresses: Addresses = {
   router: process.env.ROUTER_ADDRESS as Addresses['router'], escrow: process.env.ESCROW_ADDRESS as Addresses['escrow'],
-  subscription: process.env.SUBSCRIPTION_ADDRESS as Addresses['subscription'], gasTank: process.env.GAS_TANK_ADDRESS as Addresses['gasTank'],
+  subscription: process.env.SUBSCRIPTION_ADDRESS as Addresses['subscription'], fees: process.env.FEE_SCHEDULE_ADDRESS as Addresses['fees'],
 };
 if (!process.env.DATABASE_PATH || !process.env.RPC_URL || Object.values(addresses).some(address => !isAddress(address ?? ''))) throw new Error('DATABASE_PATH, RPC_URL and all four suite addresses are required');
 // A public synthetic signer satisfies the adapter constructor. This tool never reads a relayer key or invokes a write method.

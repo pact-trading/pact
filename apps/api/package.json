@@ -9,6 +9,7 @@
     "test": "vitest run",
     "test:router-gas": "tsx scripts/check-router-gas.ts",
     "drain-attack": "tsx scripts/drain-attack.ts",
+    "margin": "tsx scripts/margin.ts",
     "x402:prepare": "tsx scripts/x402/prepare.ts",
     "test:x402-fork": "tsx scripts/x402/fork.ts"
   },

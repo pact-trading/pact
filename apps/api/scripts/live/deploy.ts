@@ -5,18 +5,19 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createPublicClient, createWalletClient, defineChain, getFunctionSelector, http, keccak256, type Abi, type Address, type Hex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { APPROVER, USDT } from '../../src/approval.js';
+import { USDT } from '../../src/token.js';
+import { ALLOWLIST, INITIAL_TERMS, ROUTER_LIMITS, allowFlags, termsTuple } from '../../src/suite.js';
+import { readPoolPrice } from '../../src/treasury.js';
 
 const [rpcUrl, outFile] = process.argv.slice(2);
 if (!rpcUrl || !outFile) throw new Error('usage: deploy.ts <rpcUrl> <outFile>');
 const host = new URL(rpcUrl).hostname;
 if (!['127.0.0.1', 'localhost'].includes(host)) throw new Error('Local deploy only targets a local Anvil node');
 
-/** Anvil's public development accounts 0, 1 and 2. Never use these on a real network. */
+/** Anvil's public development accounts 0 and 1. Never use these on a real network. */
 export const LOCAL_KEYS = {
   deployer: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
   relayer: '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
-  feeVault: '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9ad75e9df0b77',
 } as const satisfies Record<string, Hex>;
 
 const root = fileURLToPath(new URL('../../../..', import.meta.url));
@@ -34,8 +35,8 @@ if (await pub.getChainId() !== 1874) throw new Error('The fork must keep chain i
 
 const deployer = privateKeyToAccount(LOCAL_KEYS.deployer);
 const relayer = privateKeyToAccount(LOCAL_KEYS.relayer);
-const feeVault = privateKeyToAccount(LOCAL_KEYS.feeVault);
-for (const account of [deployer, relayer, feeVault]) await rpc('anvil_setBalance', [account.address, '0x3635C9ADC5DEA00000']); // 1000 WBT
+// Only Pact's own accounts hold WBT: merchants, customers and investors only sign.
+for (const account of [deployer, relayer]) await rpc('anvil_setBalance', [account.address, '0x3635C9ADC5DEA00000']); // 1000 WBT
 
 const wallet = createWalletClient({ chain, account: deployer, transport: http(rpcUrl) });
 const wait = async (hash: Hex) => {
@@ -53,17 +54,20 @@ const write = async (address: Address, abi: Abi, functionName: string, args: unk
   wait(await wallet.writeContract({ address, abi, functionName, args, gas: 1_000_000n }));
 const selector = (abi: Abi, name: string) => getFunctionSelector(abi.find(item => item.type === 'function' && item.name === name) as never);
 
-const tank = await deploy('GasTank');
-const router = await deploy('Router', [USDT, tank.address, feeVault.address]);
-await write(tank.address, tank.abi, 'setRouter', [router.address]);
-const escrow = await deploy('PaymentEscrow', [USDT, router.address]);
-const subscription = await deploy('SubscriptionManager', [USDT, router.address, relayer.address]);
-for (const name of ['authorize', 'capture', 'charge', 'void', 'reclaim', 'refund'])
-  await write(router.address, router.abi, 'setAllowed', [escrow.address, selector(escrow.abi, name), true, false]);
-for (const name of ['subscribe', 'charge', 'cancel', 'replace'])
-  await write(router.address, router.abi, 'setAllowed', [subscription.address, selector(subscription.abi, name), true, name === 'charge']);
-// Same limits as the deployed suite, except a higher per-payer daily count so one tester can try every flow.
-await write(router.address, router.abi, 'setLimits', [1_000_000n, 1_000_000n, 40, 1_000_000, 100_000_000_000n]);
+// The FeeSchedule starts at the pool's WBT price; the relayer's treasury job keeps it current.
+const usdtPerWbt = await readPoolPrice(pub);
+// The relayer receives every fee until a fee vault exists, and keeps the WBT price.
+const fees = await deploy('FeeSchedule', [relayer.address, relayer.address, usdtPerWbt, termsTuple(INITIAL_TERMS)]);
+const router = await deploy('Router', [USDT, fees.address]);
+const escrow = await deploy('PaymentEscrow', [USDT, router.address, fees.address]);
+const subscription = await deploy('SubscriptionManagerV2', [USDT, router.address, relayer.address, fees.address]);
+const targets = { escrow, subscription } as const;
+for (const entry of ALLOWLIST) {
+  if (entry.contract === 'receivables') continue; // Added with the receivables contract.
+  const target = targets[entry.contract];
+  await write(router.address, router.abi, 'setAllowed', [target.address, selector(target.abi, entry.fn), ...allowFlags(entry)]);
+}
+await write(router.address, router.abi, 'setLimits', [ROUTER_LIMITS.minAmount, ROUTER_LIMITS.maxPayerCallsPerDay, ROUTER_LIMITS.maxGasPerCall, ROUTER_LIMITS.maxGasPrice]);
 
 // x402: the canonical upto proxy (official CREATE2 initcode, when the fork lacks it) and the agent account factory.
 const reference = JSON.parse(readFileSync(`${root}/docs/x402/whitechain-readonly.json`, 'utf8'));
@@ -81,19 +85,17 @@ for (const [address, hash] of Object.entries(runtimeHashes)) {
   if (!code || keccak256(code) !== hash) throw new Error(`x402 runtime mismatch at ${address}`);
 }
 
-const approverCode = await pub.getCode({ address: APPROVER });
-if (!approverCode || approverCode === '0x') throw new Error('SponsoredApprover is missing on the fork');
-
 const deployment = {
   chainId: 1874,
   rpcUrl,
   deployedAt: new Date().toISOString(),
-  deploymentBlock: tank.block.toString(),
+  deploymentBlock: fees.block.toString(),
   keys: LOCAL_KEYS,
-  accounts: { deployer: deployer.address, relayer: relayer.address, feeVault: feeVault.address },
-  contracts: { gasTank: tank.address, router: router.address, escrow: escrow.address, subscription: subscription.address, usdt: USDT, sponsoredApprover: APPROVER },
-  sponsoredApproverRuntimeHash: keccak256(approverCode),
+  accounts: { deployer: deployer.address, relayer: relayer.address, feeRecipient: relayer.address },
+  contracts: { fees: fees.address, router: router.address, escrow: escrow.address, subscription: subscription.address, usdt: USDT },
+  feeTerms: { version: 1, ...termsTuple(INITIAL_TERMS) },
+  usdtPerWbt: usdtPerWbt.toString(),
   x402: { factory: factory.address, runtimeHashes },
 };
-writeFileSync(outFile, `${JSON.stringify(deployment, null, 2)}\n`, { mode: 0o600 });
+writeFileSync(outFile, `${JSON.stringify(deployment, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2)}\n`, { mode: 0o600 });
 console.info(`wrote ${outFile}`);
