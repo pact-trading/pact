@@ -14,6 +14,7 @@ import {
   checkoutStatus,
   confirmTransfer,
   payByCard,
+  preparePasskeyPayment,
   preparePayment,
   submitPayment,
   startProductCheckout,
@@ -31,6 +32,10 @@ import { Receipt } from './receipt';
 
 const pendingCopy: Record<CheckoutMethodKind, { title: string; hint: string }> = {
   account: {
+    title: 'Confirming your payment',
+    hint: 'This takes a second or two. You can leave this page; your receipt will be in your account.',
+  },
+  passkey: {
     title: 'Confirming your payment',
     hint: 'This takes a second or two. You can leave this page; your receipt will be in your account.',
   },
@@ -100,6 +105,15 @@ export function CheckoutView({ initial, payer }: { initial: CheckoutState; payer
     run('account', () =>
       signed(
         () => preparePayment(state.id),
+        (token, signature) => submitPayment(token, signature),
+      ),
+    );
+
+  // The same payment, confirmed with the customer's passkey account (Face ID, Touch ID or a security key).
+  const payWithPasskey = () =>
+    run('passkey', () =>
+      signed(
+        () => preparePasskeyPayment(state.id),
         (token, signature) => submitPayment(token, signature),
       ),
     );
@@ -218,6 +232,25 @@ export function CheckoutView({ initial, payer }: { initial: CheckoutState; payer
           ),
         },
       ];
+    if (option.kind === 'passkey') {
+      const short = option.balanceMinor !== null && BigInt(option.balanceMinor) < BigInt(state.total.amountMinor);
+      return [
+        {
+          id: 'passkey',
+          icon: 'passkey',
+          title: 'Passkey account',
+          description:
+            option.balanceMinor !== null
+              ? `Balance ${usd(option.balanceMinor)} · confirm with Face ID, Touch ID or a security key`
+              : 'Confirm with Face ID, Touch ID or a security key',
+          detail: short ? (
+            <Notice tone="warning">
+              Your passkey account holds {usd(option.balanceMinor!)}. Add funds to it from your account page, or pay from your Pact account.
+            </Notice>
+          ) : undefined,
+        },
+      ];
+    }
     if (option.kind === 'card')
       return [
         {
@@ -260,6 +293,17 @@ export function CheckoutView({ initial, payer }: { initial: CheckoutState; payer
       onClick: payWithAccount,
       disabled: !open || state.readiness !== 'ready' || busy !== null,
       busy: busy === 'account',
+      busyLabel: 'Waiting for your passkey…',
+    },
+    passkey: {
+      label: `Pay ${amount}`,
+      icon: 'passkey',
+      onClick: payWithPasskey,
+      disabled:
+        !open ||
+        busy !== null ||
+        options.some(o => o.kind === 'passkey' && o.balanceMinor !== null && BigInt(o.balanceMinor) < BigInt(state.total.amountMinor)),
+      busy: busy === 'passkey',
       busyLabel: 'Waiting for your passkey…',
     },
     card: {

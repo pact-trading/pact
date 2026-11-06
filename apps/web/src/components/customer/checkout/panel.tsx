@@ -29,6 +29,7 @@ export const checkoutInput = cn(
 
 const methodIcons = {
   account: IconUserCircle,
+  passkey: IconFingerprint,
   card: IconCreditCard,
   bank: IconBuildingBank,
   wallet: IconWallet,

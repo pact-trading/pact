@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { IconFingerprint, IconKeyOff } from '@tabler/icons-react';
 import { AddFunds } from '@/components/customer/add-funds';
+import { PasskeyAccountCard } from '@/components/customer/passkey-account';
 import { NotificationPreferencesCard } from '@/components/notifications/notification-preferences';
 import { NotConnected } from '@/components/states/not-connected';
 import { Card, CardBody, CardHeader, DetailList } from '@/components/ui/card';
@@ -16,6 +17,12 @@ export const metadata: Metadata = { title: 'Account' };
 export default async function AccountPage() {
   const account = await load(async () => (await getData()).customer.account());
   const notifications = await load(async () => (await getData()).customer.notificationPreferences());
+  // Live mode with passkey accounts: the customer's passkey account (hidden when the source or API has none).
+  const passkey = await (async () => {
+    const source = (await getData()).customer;
+    if (!source.passkeyAccount || !source.passkeyRegistration) return undefined;
+    try { return { account: await source.passkeyAccount() }; } catch { return undefined; }
+  })();
   if (isNotWired(account)) return <NotConnected feature={account.feature} />;
   return (
     <>
@@ -46,6 +53,7 @@ export default async function AccountPage() {
             </p>
           </CardBody>
         </Card>
+        {passkey && <PasskeyAccountCard initial={passkey.account} local={process.env.PACT_LOCAL_FORK === '1'} />}
         <Card>
           <CardHeader title="Balance" />
           <CardBody className="grid gap-4">

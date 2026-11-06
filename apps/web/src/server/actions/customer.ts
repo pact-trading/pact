@@ -3,7 +3,7 @@
 import type { CheckoutMetadata } from '@pactagent/core/checkout-fields';
 import { revalidatePath } from 'next/cache';
 import { getData } from '../data';
-import type { ApprovalSignature, CardDetails } from '../data/types';
+import type { ApprovalSignature, CardDetails, PasskeyRegistration } from '../data/types';
 import { attempt } from './result';
 
 const customer = async () => (await getData()).customer;
@@ -60,6 +60,31 @@ export const submitApproval = async (token: string, approval: ApprovalSignature)
     const source = await checkout();
     if (!source.submitApproval) throw new Error('Approvals are only needed with live data');
     return source.submitApproval(token, approval);
+  });
+/** Live mode: the payment, confirmed with the customer's passkey account. */
+export const preparePasskeyPayment = async (sessionId: string) =>
+  attempt(async () => {
+    const source = await checkout();
+    if (!source.preparePasskeyPayment) throw new Error('Passkey accounts are only available with live data');
+    return source.preparePasskeyPayment(sessionId);
+  });
+export const passkeyRegistration = async () =>
+  attempt(async () => {
+    const source = await customer();
+    if (!source.passkeyRegistration) throw new Error('Passkey accounts are only available with live data');
+    return source.passkeyRegistration();
+  });
+export const registerPasskey = async (input: PasskeyRegistration) =>
+  done(async () => {
+    const source = await customer();
+    if (!source.registerPasskey) throw new Error('Passkey accounts are only available with live data');
+    return source.registerPasskey(input);
+  });
+export const fundPasskeyAccount = async () =>
+  done(async () => {
+    const source = await customer();
+    if (!source.fundPasskeyAccount) throw new Error('Test funds are only available on a local fork');
+    return source.fundPasskeyAccount();
   });
 export const submitPayment = async (token: string, signature: string) =>
   done(async () => (await checkout()).submitPayment(token, signature));

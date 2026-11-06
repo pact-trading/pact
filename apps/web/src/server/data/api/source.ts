@@ -25,7 +25,7 @@ import type {
 import { reasonDetail } from '@/lib/reasons';
 import { merchantApi, publicApi, sessionApi, SessionError } from '../../api-client';
 import { DataError, NotWiredError, approvalUnavailable } from '../errors';
-import type { CheckoutState, DataSource, MerchantPreferences, NotificationPreferences, OrderDetail, SignRequest } from '../types';
+import type { CheckoutState, DataSource, MerchantPreferences, NotificationPreferences, OrderDetail, PasskeyAccountView, PasskeyRegistrationOptions, PasskeyRequest, SignRequest } from '../types';
 import { createApiCommerce, type ApiManualOrder } from './commerce-extras';
 import { createApiFinancing } from './financing';
 import { createApiSubscriptions } from './subscriptions';
@@ -748,6 +748,21 @@ export const apiSource: DataSource = {
         testFunds: { amountMinor: local ? '25000000' : '0', nextClaimAt: null },
       };
     },
+    async passkeyAccount() {
+      return (await api<{ account: PasskeyAccountView | null }>('/v1/commerce/me/passkey-account')).account;
+    },
+    passkeyRegistration: () => post<PasskeyRegistrationOptions>('/v1/commerce/me/passkey-account/options', {}),
+    async registerPasskey(input) {
+      return (await post<{ account: PasskeyAccountView }>('/v1/commerce/me/passkey-account', input)).account;
+    },
+    async fundPasskeyAccount() {
+      if (process.env.PACT_LOCAL_FORK !== '1')
+        throw new DataError('ask_the_business', 'On testnet, send test USDT to your passkey account address.', 400);
+      const account = (await api<{ account: PasskeyAccountView | null }>('/v1/commerce/me/passkey-account')).account;
+      if (!account) throw new DataError('passkey_required', 'Create a passkey account first.', 409);
+      await post('/v1/dev/faucet', { address: account.account, usdt: '25' });
+      return (await api<{ account: PasskeyAccountView }>('/v1/commerce/me/passkey-account')).account;
+    },
     async claimTestFunds() {
       if (process.env.PACT_LOCAL_FORK !== '1')
         throw new DataError(
@@ -835,6 +850,10 @@ export const apiSource: DataSource = {
       const readiness = await api<{ status: string; balance: string | null }>(
         `/v1/commerce/checkout-sessions/${encodeURIComponent(id)}/readiness`,
       ).catch(() => null);
+      // A passkey account, when the customer created one (and the API has passkeys), is a second way to pay.
+      const passkey = await api<{ account: PasskeyAccountView | null }>('/v1/commerce/me/passkey-account')
+        .then(r => r.account)
+        .catch(() => null);
       const paid = ['paid', 'partially_refunded', 'refunded'].includes(detail.order.status);
       const state: CheckoutState = {
         id,
@@ -876,8 +895,11 @@ export const apiSource: DataSource = {
           gasPaidBy: 'Pact',
           gasWei: null,
         },
-        // The API settles from the payer's Pact account only; card, bank and own wallet are demo-only.
-        methods: [{ kind: 'account' }],
+        // The API settles from the payer's Pact account (or passkey account); card, bank and own wallet are demo-only.
+        methods: [
+          { kind: 'account' },
+          ...(passkey ? [{ kind: 'passkey' as const, account: passkey.account, balanceMinor: passkey.balanceMinor }] : []),
+        ],
         method: null,
         returnPath: detail.order.productId ? `/buy/${detail.order.productId}` : null,
       };
@@ -925,9 +947,22 @@ export const apiSource: DataSource = {
       });
       return paymentRequest(held.sessionId, await waitUntilReady(base));
     },
+    async preparePasskeyPayment(sessionId) {
+      // Passkey accounts pay product checkouts; invoices keep the Pact account.
+      if (sessionId.startsWith(HOSTED))
+        throw new DataError('passkey_unavailable', 'Pay this invoice from your Pact account.', 409);
+      const request = await api<{ data: string; intent: Record<string, unknown>; passkey: PasskeyRequest }>(
+        `${sessionBase(sessionId)}/passkey-intent`,
+      );
+      return hold(
+        'payment',
+        { sessionId, data: request.data, intent: request.intent, route: 'passkey-intent' },
+        { title: 'Confirm payment', lines: [], typedData: {}, passkey: request.passkey },
+      );
+    },
     async submitPayment(token, signature) {
-      const held = (await take('payment', token)) as { sessionId: string; data: string; intent: unknown };
-      await post(`${sessionBase(held.sessionId)}/intent`, {
+      const held = (await take('payment', token)) as { sessionId: string; data: string; intent: unknown; route?: string };
+      await post(`${sessionBase(held.sessionId)}/${held.route === 'passkey-intent' ? 'passkey-intent' : 'intent'}`, {
         data: held.data,
         intent: held.intent,
         signature,

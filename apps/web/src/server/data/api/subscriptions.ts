@@ -28,6 +28,8 @@ type SubscriptionIntent = {
   approval: Approval;
   mandate: Record<string, unknown>;
   typedData: Record<string, unknown>;
+  /** One transaction: the manager takes this permit with the mandate (`subscribeWithPermit`). */
+  permit?: { value: string; deadline: string; nonce: string | null; typedData: Record<string, unknown> };
 };
 const usdt = (minor: string | bigint) => `${(Number(minor) / 1e6).toFixed(2)} USDT`;
 const every = (seconds: number) =>
@@ -55,10 +57,11 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
     }
     throw new DataError('approval_pending', 'The approval is still confirming. Try again in a moment.', 409);
   }
-  const mandateRequest = (planId: string, intent: SubscriptionIntent, name: string): Promise<SignRequest> =>
+  /** The mandate to sign; with `permit`, the permit is signed in the same confirmation (one transaction). */
+  const mandateRequest = (planId: string, intent: SubscriptionIntent, name: string, permit?: SubscriptionIntent['permit']): Promise<SignRequest> =>
     hold(
       'subscribe',
-      { planId, mandate: intent.mandate },
+      { planId, mandate: intent.mandate, ...(permit ? { permit: { value: permit.value, deadline: permit.deadline } } : {}) },
       {
         title: `Subscribe to ${name}`,
         lines: [
@@ -68,8 +71,10 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
           },
           { label: 'Periods', value: String(intent.mandate.maxPeriods) },
           { label: 'Cancel', value: 'Any time, at no cost' },
+          ...(permit ? [{ label: 'Allows renewals up to', value: usdt(permit.value) }] : []),
         ],
         typedData: intent.typedData,
+        ...(permit ? { also: [permit.typedData] } : {}),
       },
     );
   async function prepareSubscribe(planId: string, approvalKey?: string): Promise<SignRequest> {
@@ -80,6 +85,8 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
     const offer = await api<{ plan: { name: string } }>(plan(planId));
     const { approval } = intent;
     if (approval.status === 'ready') return mandateRequest(planId, intent, offer.plan.name);
+    // The mandate and the permit in one confirmation; Pact sends them as one transaction.
+    if (intent.permit) return mandateRequest(planId, intent, offer.plan.name, intent.permit);
     if (approval.status === 'pending') {
       await waitForApproval(planId, intent.approvalKey);
       return prepareSubscribe(planId, intent.approvalKey);
@@ -342,10 +349,17 @@ export function createApiSubscriptions({ api, mApi, mPost, post, hold, take, set
     },
     prepareSubscribe: planId => prepareSubscribe(planId),
     async submitSubscribe(token, signature) {
-      const held = (await take('subscribe', token)) as { planId: string; mandate: Record<string, unknown> };
+      const held = (await take('subscribe', token)) as {
+        planId: string;
+        mandate: Record<string, unknown>;
+        permit?: { value: string; deadline: string };
+      };
+      // With a permit, the confirmation returned both signatures: the mandate first, then the permit.
+      const [mandateSignature, permitSignature] = held.permit ? (JSON.parse(signature) as [string, string]) : [signature];
       const created = await post<{ id: string }>(`${plan(held.planId)}/subscribe`, {
         mandate: held.mandate,
-        signature,
+        signature: mandateSignature,
+        ...(held.permit ? { permit: { ...held.permit, signature: permitSignature } } : {}),
       });
       await settled(
         () => customer.subscription(created.id),

@@ -60,6 +60,48 @@ export interface SignRequest {
   also?: Array<Record<string, unknown>>;
   /** This signature is a first step: `continueSigned` turns it into the next request, in the same confirmation. */
   continues?: boolean;
+  /**
+   * Confirm with the customer's passkey account instead of an EIP-712 signature: a WebAuthn assertion
+   * (`navigator.credentials.get`, user verification required) over `challenge`. The submit receives the
+   * assertion as JSON, with the signature split into r and a low s.
+   */
+  passkey?: PasskeyRequest;
+}
+
+/** A WebAuthn assertion request for a passkey account. `challenge` and credential ids are base64url. */
+export interface PasskeyRequest {
+  challenge: string;
+  rpId: string;
+  allowCredentials: string[];
+  userVerification: 'required';
+}
+/** `navigator.credentials.create` options for a new passkey account (ES256, user verification required). */
+export interface PasskeyRegistrationOptions {
+  challenge: string;
+  rp: { name: string; id: string };
+  user: { id: string; name: string; displayName: string };
+  pubKeyCredParams: Array<{ type: 'public-key'; alg: number }>;
+  authenticatorSelection: {
+    userVerification: 'required';
+    residentKey: 'preferred' | 'required' | 'discouraged';
+  };
+  attestation: 'none';
+  timeout: number;
+}
+/** What the browser created: the credential id, its SPKI public key and client data, base64url. */
+export interface PasskeyRegistration {
+  credentialId: string;
+  publicKey: string;
+  clientDataJSON: string;
+}
+/** The customer's passkey account: a smart account their passkey controls, holding USDT. */
+export interface PasskeyAccountView {
+  account: string;
+  credentialId: string;
+  /** False until the first payment deploys it (its address can be funded before). */
+  deployed: boolean | null;
+  balanceMinor: string | null;
+  createdAt: string;
 }
 
 export interface RefundEntry {
@@ -114,7 +156,7 @@ export type CheckoutKind = 'product' | 'invoice' | 'link' | 'order';
  * How a checkout is paid. `account` is the payer's Pact balance and the only method the API
  * offers; card, bank transfer and own wallet are simulated in the demo sandbox.
  */
-export type CheckoutMethodKind = 'account' | 'card' | 'bank' | 'wallet';
+export type CheckoutMethodKind = 'account' | 'passkey' | 'card' | 'bank' | 'wallet';
 
 /** The method a payment used, for the receipt and the merchant's order page. */
 export interface PaymentMethodUsed {
@@ -128,6 +170,8 @@ export interface PaymentMethodUsed {
 /** One way to pay a checkout, with what the payer needs to use it. */
 export type CheckoutMethodOption =
   | { kind: 'account' }
+  /** The customer's passkey account (Face ID, Touch ID or a security key), when they have one. */
+  | { kind: 'passkey'; account: string; balanceMinor: string | null }
   | { kind: 'card'; demo: true; declineNumber: string }
   | {
       kind: 'bank';
@@ -398,6 +442,14 @@ export interface CustomerData {
   connectTelegram(): Promise<{ url: string; expiresAt: string }>;
   disconnectTelegram(): Promise<void>;
   claimTestFunds(): Promise<CustomerAccount>;
+  /** Live mode: the customer's passkey account, or null when they have not created one. */
+  passkeyAccount?(): Promise<PasskeyAccountView | null>;
+  /** Live mode: options for `navigator.credentials.create`, with a one-time challenge. */
+  passkeyRegistration?(): Promise<PasskeyRegistrationOptions>;
+  /** Live mode: stores the new passkey; returns its account. */
+  registerPasskey?(input: PasskeyRegistration): Promise<PasskeyAccountView>;
+  /** Local fork only: test USDT to the passkey account. */
+  fundPasskeyAccount?(): Promise<PasskeyAccountView>;
 
   orders(): Promise<OrderListItem[]>;
   order(id: string): Promise<OrderDetail>;
@@ -461,6 +513,8 @@ export interface CheckoutData {
    */
   submitApproval?(token: string, approval: ApprovalSignature): Promise<SignRequest>;
   submitPayment(token: string, signature: string): Promise<CheckoutState>;
+  /** Live mode: the same payment, confirmed with the customer's passkey account (one WebAuthn assertion). */
+  preparePasskeyPayment?(sessionId: string): Promise<SignRequest>;
   /** Demo sandbox only. A declined card leaves the checkout open; an accepted one settles like any payment. */
   payByCard(sessionId: string, card: CardDetails): Promise<CheckoutState>;
   /** Demo sandbox only. The payer says the transfer was sent; it settles through the same pending → paid path. */
