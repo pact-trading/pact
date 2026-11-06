@@ -1,0 +1,73 @@
+---
+title: Contracts
+description: Functions and rules of the Pact contracts.
+---
+
+Everything Pact promises about money is enforced by these contracts. They are not proxies: the code at each address can't be changed.
+
+## The contract set
+
+Pact runs on Whitechain (chain ID `1874`). The contracts are the Router, GasTank, PaymentEscrow and SubscriptionManager, a SponsoredApprover (EIP-7702), the x402 account factory and its `upto` and `exact` Permit2 proxies, canonical Permit2, and a test USDT token. Each is described below; configure the addresses your integration needs from your environment.
+
+USDT has 6 decimals: `1000000` is 1.00 USDT.
+
+## Router
+
+Runs a signed intent for a payer, checks the rules, and reimburses the relayer from the merchant's tank in the same transaction.
+
+| Limit | Value |
+| --- | --- |
+| Minimum sponsored amount | 1.00 USDT |
+| Sponsored calls per payer per day | 40 |
+| Max gas per call | 1,000,000 |
+| Max fee per gas | 100 gwei |
+
+Intents are EIP-712 typed data with the domain name `Settle Router`, a nonce and a deadline. The Router only calls an allowlisted set of functions on Pact's contracts. See [Drain protection](/merchant/drain-protection) for every refusal reason.
+
+## GasTank
+
+Holds WBT per merchant. `deposit()`, `withdraw(amount)`, and a daily cap per merchant. Only the Router can draw from it, and only from the tank of the merchant whose payment it was.
+
+## PaymentEscrow
+
+`authorize`, `capture`, `charge`, `void`, `reclaim` and `refund`. Total refunds on a payment can never exceed what was captured, and refunds close after the merchant's refund window (30 days by default).
+
+### Refund directly, without Pact
+
+Under 1.00 USDT, or if you'd rather not use the relayer, call `refund` from your merchant wallet and pay the gas yourself:
+
+```ts
+import { createWalletClient, custom, keccak256, parseUnits, toHex } from 'viem';
+
+const wallet = createWalletClient({ chain: whitechainSepolia, transport: custom(window.ethereum) });
+
+await wallet.writeContract({
+  address: process.env.PAYMENT_ESCROW_ADDRESS as `0x${string}`,
+  abi: escrowAbi,
+  functionName: 'refund',
+  args: [paymentId, parseUnits('0.50', 6), keccak256(toHex('Customer request'))],
+});
+```
+
+## SubscriptionManager
+
+Stores each mandate (merchant, plan, cap per period, period length, max periods, end time) signed with the domain `Settle Subscription`. `charge` is refused with `too_early`, `cap_exceeded`, `cancelled`, `expired` or `max_periods`; `replace` swaps one mandate for another in one transaction. See [Subscriptions](/merchant/subscriptions).
+
+## Read the events yourself
+
+Every payment, refund, renewal and refusal emits an event. Anyone can read them on a block explorer or with any RPC client:
+
+```bash
+cast logs --rpc-url https://rpc.testnet.whitechain.io \
+  --address $PAYMENT_ESCROW_ADDRESS --from-block latest
+```
+
+## Source and tests
+
+The Foundry project is in [`contracts/`](https://github.com/pact-trading/pact-pay/tree/main/contracts).
+
+```bash
+cd contracts
+forge build
+forge test
+```

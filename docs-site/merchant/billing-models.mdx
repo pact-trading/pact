@@ -1,0 +1,43 @@
+---
+title: Billing models
+description: The ways a customer can pay you, and when to use each.
+---
+
+Pact supports three ways to charge. They settle in USDT on Whitechain. Hosted one-time and subscription payments have [refunds](/merchant/refunds), [webhooks](/integrate/webhooks) and [exports](/merchant/exports). If you protect your own API with x402 middleware, keep separate records for those calls; they are not automatically included in Pact's export.
+
+| Model | The customer pays | Use it for | Set it up with |
+| --- | --- | --- | --- |
+| **One-time** | Once, now | Digital goods, services, a single invoice | A product, a payment link, an invoice or a manual order |
+| **Subscription** | A fixed amount under a cap they sign once; automatic charging currently runs on V1 | SaaS plans, memberships, API plans | A plan |
+| **Pay-per-use** | A small amount for each request, before they get the result | APIs used by AI agents and other software | A paid endpoint over [x402](/integrate/agent-payments) |
+
+## One-time
+
+The customer pays a fixed price once. You can take one-time payments in four ways:
+
+- **Checkout link** (`/buy/prod_…`): a link to a product in your catalog. Anyone with the link can buy it at the product's price.
+- **Payment link** (`/l/…`): a standalone link that doesn't need a product. It can have a fixed amount or let the customer type an amount (a tip). Payment links count visits and can be turned off. For a subscription, share the plan's subscribe link.
+- **Invoice**: a bill for one customer, with a due date, reminders and optional partial payments.
+- **Manual order**: an order you create for one customer at a price you agreed with them.
+
+All four open the same hosted checkout.
+
+## Subscription
+
+The customer signs one mandate: the plan, the maximum amount per period, the period length and an end date. Pact's V1 keeper charges each period automatically. The contract refuses any charge that is too early, too large, or made after the customer cancelled. V2 funded automatic renewals remain disabled in live mode; see [Subscriptions](/merchant/subscriptions).
+
+You can add a [free trial](/merchant/free-trials) or a [discount](/merchant/discounts) to a plan.
+
+## Pay-per-use
+
+Software pays software. An AI agent calls your paid endpoint, gets an HTTP `402 Payment Required` answer with a price, pays in USDT, and receives the result. Each request is its own payment. The agent's owner sets spending limits per call and per day. See [Agent payments](/integrate/agent-payments).
+
+### Prepaid balance
+
+An agent pays from its own agent account, which its owner tops up with USDT. Each paid request is deducted from that balance. When the balance or the daily limit runs out, requests are refused until the owner tops up or the next day starts. This works like prepaid credits, without you having to track a balance.
+
+## Coming soon
+
+- **Usage-based billing**: meter usage (tokens, requests, gas) during a period and charge once at the end, under the customer's cap.
+- **Credits included in a plan**, for example 1 million tokens per month on a Pro plan.
+- **Card payments** as a second payment method.

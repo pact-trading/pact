@@ -1,0 +1,69 @@
+---
+title: Refunds
+description: Give money back in one click, with a record your customer can check.
+---
+
+You can refund all or part of any payment. The USDT goes straight back to the customer's account, and the refund is recorded on Whitechain, so the customer can check it without trusting you or Pact.
+
+<Frame caption="Refunding part of an order">
+  <img src="/images/merchant-refund.png" alt="Refund dialog with amount and reason" />
+</Frame>
+
+## Refund from the dashboard
+
+<Steps>
+  <Step title="Open the order">
+    Go to **Orders** (or **Customers**, then the customer) and open the order.
+  </Step>
+  <Step title="Click Refund">
+    Enter the amount to refund. Use the remaining balance for a full refund, or a smaller amount for a partial refund. Pick a reason.
+  </Step>
+  <Step title="Confirm">
+    Your wallet asks you to sign a message. Signing is free: you never pay gas for a refund. Pact sends the transaction for you.
+  </Step>
+</Steps>
+
+The refund usually confirms within a few seconds. The order then shows **Refunded** or **Partially refunded**, with a link to the transaction on the explorer.
+
+## Rules the contract enforces
+
+| Rule | What happens |
+| --- | --- |
+| A refund can't be larger than what's left of the payment | Total refunds on a payment can never exceed what was captured. A third refund that would go over is refused onchain. |
+| Partial refunds can repeat | Refund 10 USDT today and 5 USDT next week, as long as the total stays within the payment. |
+| Refund window | Refunds are allowed for **30 days** after the payment by default. Change it under **Settings**. |
+| Minimum amount | Refunds that Pact sends for you must be at least **1.00 USDT**. See below. |
+
+### Refunds under 1.00 USDT
+
+Pact refuses to sponsor any call under 1.00 USDT, so that nobody can drain your gas tank with tiny transactions. To refund less than that, call `PaymentEscrow.refund` directly from your own wallet and pay the gas yourself. See [Contracts](/integrate/contracts).
+
+## What your customer sees
+
+- The refund in their [customer portal](/customer/refunds), with the amount, the reason and an explorer link.
+- A new row in your [CSV export](/merchant/exports), as a negative amount tied to the original payment.
+
+## What your systems receive
+
+Pact sends `payment.refunded` when a refund confirms onchain. A product checkout order also sends `order.refunded`; direct and payment-link payments do not.
+
+## Refund from your server
+
+```ts
+import { createPactNodeClient } from '@pactagent/node';
+
+const pact = createPactNodeClient({
+  apiKey: process.env.PACT_SECRET_KEY!,
+  baseUrl: 'https://api.pactagent.app',
+});
+
+// The merchant still signs the refund intent; the SDK never signs for you.
+const refund = await pact.payments.refund(paymentId, {
+  amount: '5.00',            // decimal USDT; omit for the remaining amount
+  reason: 'Customer request',
+  intent, data, signature,   // the signed Router intent for PaymentEscrow.refund
+});
+// refund.status is "pending" until the transaction confirms.
+```
+
+See the [SDK reference](https://github.com/pact-trading/pact-pay/blob/main/packages/README.md#signed-refunds-and-subscriptions) for how to build and sign the refund intent.

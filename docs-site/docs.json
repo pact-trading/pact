@@ -1,0 +1,160 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "maple",
+  "name": "Pact",
+  "colors": {
+    "primary": "#4D7C0F",
+    "light": "#C6FF34",
+    "dark": "#0E1116"
+  },
+  "background": {
+    "color": {
+      "light": "#F3F4F6",
+      "dark": "#090909"
+    }
+  },
+  "logo": {
+    "light": "/images/logo-light.svg",
+    "dark": "/images/logo-dark.svg",
+    "href": "https://pactagent.app"
+  },
+  "fonts": {
+    "family": "Geist"
+  },
+  "appearance": {
+    "default": "system"
+  },
+  "favicon": "/images/favicon.svg",
+  "navbar": {
+    "links": [
+      {
+        "label": "llms.txt",
+        "href": "https://docs.pactagent.app/llms.txt"
+      },
+      {
+        "label": "Live demo",
+        "href": "https://demo.pactagent.app"
+      },
+      {
+        "label": "GitHub",
+        "href": "https://github.com/pact-trading/pact-pay"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Open dashboard",
+      "href": "https://pay.pactagent.app/login"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Merchant",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "index",
+              "merchant/quickstart"
+            ]
+          },
+          {
+            "group": "Products and pricing",
+            "pages": [
+              "merchant/billing-models",
+              "merchant/free-trials",
+              "merchant/discounts"
+            ]
+          },
+          {
+            "group": "After the payment",
+            "pages": [
+              "merchant/refunds",
+              "merchant/subscriptions"
+            ]
+          },
+          {
+            "group": "Finance",
+            "pages": [
+              "merchant/exports"
+            ]
+          },
+          {
+            "group": "Payment methods",
+            "pages": [
+              "merchant/crypto",
+              "merchant/gas-tank",
+              "merchant/drain-protection"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Integrate",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "agents/overview",
+              "agents/runbook",
+              "integrate/how-pact-works"
+            ]
+          },
+          {
+            "group": "API",
+            "pages": [
+              "agents/api"
+            ]
+          },
+          {
+            "group": "Checkout",
+            "pages": [
+              "integrate/embedded-checkout"
+            ]
+          },
+          {
+            "group": "Webhooks",
+            "pages": [
+              "integrate/webhooks"
+            ]
+          },
+          {
+            "group": "Agents and access",
+            "pages": [
+              "integrate/agent-payments"
+            ]
+          },
+          {
+            "group": "Payment methods: Crypto",
+            "pages": [
+              "integrate/contracts"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Customer",
+        "groups": [
+          {
+            "group": "Paying",
+            "pages": [
+              "customer/pay-with-email"
+            ]
+          },
+          {
+            "group": "Your account",
+            "pages": [
+              "customer/subscriptions",
+              "customer/refunds"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/pact-trading/pact-pay"
+    }
+  }
+}

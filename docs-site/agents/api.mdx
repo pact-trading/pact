@@ -1,0 +1,93 @@
+---
+title: API for agents
+description: Every Pact endpoint a coding agent can call with a merchant's secret key, with request and response shapes.
+---
+
+Base URL `https://api.pactagent.app`. Send `Authorization: Bearer $PACT_SECRET_KEY` on every call, and `content-type: application/json` on `POST`. Amounts are decimal USDT strings.
+
+Errors come back as `{ "error": { "code": "…" } }` with a `4xx` status. `401 unauthorized` means a bad key. `403 secret_key_required` means you used a publishable key on a server-only route.
+
+## Account
+
+| Method and path | What it returns |
+| --- | --- |
+| `GET /v1/config` | `chainId`, the merchant address and contract addresses. Use it to check a key. |
+| `GET /v1/settings` | Business name, logo and checkout settings |
+| `GET /v1/api-keys` | Key ids, kinds and names. The keys themselves are never returned. |
+
+## Payments
+
+### `POST /v1/payments`
+
+Creates a payment and its hosted checkout.
+
+```json Request
+{
+  "amount": "12.50",
+  "description": "Pro plan, 1 month",
+  "email": "ana@example.com",
+  "metadata": { "orderId": "A-1042" },
+  "expires_in": 3600
+}
+```
+
+Only `amount` is required by the API. For a hosted checkout that a customer can open, include their `email`: the payment is reserved for the Pact account signed in with that address. `expires_in` is in seconds.
+
+```json Response
+{
+  "id": "0x5a1f…",
+  "amount": "12.50",
+  "currency": "USDT",
+  "status": "pending",
+  "financialStatus": "open",
+  "checkoutUrl": "https://pay.pactagent.app/pay/0x5a1f…",
+  "refundWindowSeconds": 2592000
+}
+```
+
+### `GET /v1/payments/:id`
+
+`status` is `pending`, `succeeded`, `refunded` or `failed`. Also returns `captured`, `refunded`, `payer`, `customer` and `txHash`. Use it to double-check a webhook, not as a polling loop.
+
+### `GET /v1/payments`
+
+The latest 100 payments.
+
+### Refunds
+
+Refunds need the merchant's wallet signature. An agent can't send one alone: ask the human to refund from **Orders** in the dashboard. See [Refunds](/merchant/refunds).
+
+## Payment links
+
+| Method and path | |
+| --- | --- |
+| `POST /v1/payment-links` | Body: `kind` (`product` or `tip`), `name`, `amount` (not for `tip`), optional `description`, `singleUse`, `expiresOn` (`YYYY-MM-DD`). Returns the link with its `url`. For subscriptions, share a plan's `/subscribe/<plan-id>` URL. |
+| `GET /v1/payment-links` | All links |
+| `POST /v1/payment-links/:id/deactivate` | Stop a link from taking payments |
+
+## Products and orders
+
+| Method and path | |
+| --- | --- |
+| `GET /v1/commerce/products` | Products with their prices. Paginate with `limit` and `after`. |
+| `GET /v1/commerce/products/:id` | One product |
+| `GET /v1/commerce/orders` | Orders. Filter with `customerId`; do not assume chronological order. |
+| `GET /v1/commerce/orders/:id` | One order with its receipt |
+
+Create and edit products in the dashboard under **Products**, or use payment links above.
+
+## Webhooks
+
+| Method and path | |
+| --- | --- |
+| `POST /v1/webhooks/config` | Body `{ "url": "https://…" }`. Returns `{ url, signingSecret }`. Calling it again rotates the secret. |
+| `POST /v1/webhooks/test` | Sends a `webhook.test` event. Returns `{ eventId }`. |
+| `GET /v1/webhooks/events` | The latest 100 events: `id`, `type`, `object_id`, `created_at` |
+| `GET /v1/webhooks/deliveries` | Current delivery state per event, with attempt count, `last_http_status` and `last_error`; not a history row for every attempt |
+| `POST /v1/webhooks/events/:id/replay` | Send an event again |
+
+Payload, headers and event types: [Webhooks](/integrate/webhooks).
+
+## Not available to agents
+
+Ask the merchant before signing in, creating or revoking API keys, funding the gas tank, setting the daily cap, approving fees and refunds, or signing refunds. The API technically accepts a secret key for key creation and revocation; the agent runbook requires human approval for those actions.

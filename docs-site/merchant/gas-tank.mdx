@@ -1,0 +1,54 @@
+---
+title: Gas tank
+description: How you pay gas for your customers, where the WBT comes from, and how long it lasts.
+---
+
+Your customers never pay gas. You do, from your own **gas tank**: a balance of WBT held for you in the `GasTank` contract. After each sponsored call, the Router pays the relayer back from your tank, at the gas actually used, in the same transaction. Another merchant's customers can never spend your WBT.
+
+<Frame caption="Gas tank: balance, daily cap and runway">
+  <img src="/images/merchant-gas-tank.png" alt="Gas tank page" />
+</Frame>
+
+## Fund the tank
+
+1. Get WBT. On the testnet, claim it from the [Whitechain faucet](https://faucet.testnet.whitechain.io) (one drip per GitHub account every 24 hours).
+2. Open **Gas tank** and click **Deposit**. Enter an amount (0.2 WBT is plenty to start) and confirm in your wallet.
+3. Set a **daily cap**: the most WBT your tank may spend in one day. Calls above it are refused, so a spike can never empty the tank.
+
+You can withdraw unused WBT at any time.
+
+## What it costs
+
+A plain transfer on Whitechain costs about **0.000105 WBT**. A sponsored payment uses a little more because it also runs the Router's checks. In practice 0.2 WBT covers more than a thousand payments.
+
+| Page | What you see |
+| --- | --- |
+| Balance | WBT in your tank |
+| Daily cap | Spent today out of your cap |
+| Runway | Days left at your average spend over the last 7 days with spending |
+| Ledger | Every reimbursement, labelled with the payment it paid for and an explorer link |
+
+When runway drops under **7 days**, Pact queues an email if you entered an address under **Settings → Notifications** and enabled gas-tank alerts. **Overview** shows a coloured runway meter.
+
+## Absorb the gas or pass it on
+
+Under **Gas tank → Policy**, choose:
+
+- **Absorb**: you pay the gas. The customer pays the price you set.
+- **Surcharge**: the Pact fee on each payment grows to cover the gas, so the WBT you spend comes back to you in USDT.
+
+Either way the customer still never holds WBT.
+
+## Where the WBT comes from on mainnet
+
+On the testnet you top up from the faucet. On mainnet, Pact will refill your tank automatically: when runway falls under your threshold, it swaps a share of your USDT fee revenue for WBT on Whitechain's DEX. Your payment volume pays for its own gas.
+
+## What isn't paid from your tank
+
+Keeper renewals, x402 settlements and agent setup are paid by Pact's relayer today, not from your tank.
+
+## Next
+
+<Card title="Drain protection" icon="shield" href="/merchant/drain-protection">
+  The eight limits that stop anyone from emptying your tank.
+</Card>

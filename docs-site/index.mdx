@@ -1,0 +1,62 @@
+---
+title: Introduction
+description: Get paid in USDT on Whitechain, from the first checkout to everything after it.
+---
+
+Pact gives a business everything it needs to get paid in stablecoins: products, checkout links, an embeddable checkout, invoices, subscriptions, refunds, exports and webhooks. Your customers pay with an email sign-in. They never need a wallet app, a seed phrase or gas.
+
+<Note>
+Pact runs on **Whitechain Sepolia** (testnet, chain ID 1874). Test USDT and WBT have no monetary value. Card payments are planned as a second payment method.
+</Note>
+
+<Frame caption="The merchant dashboard">
+  <img src="/images/merchant-overview.png" alt="Pact merchant dashboard overview" />
+</Frame>
+
+## Try it
+
+<CardGroup cols={2}>
+  <Card title="Let your agent integrate it" icon="robot" href="/agents/overview">
+    Paste one prompt into Claude Code, Codex or Cursor. It reads these docs and builds the integration.
+  </Card>
+  <Card title="Live on testnet" icon="bolt" href="https://pay.pactagent.app">
+    The real app on Whitechain Sepolia. Sign in, take a test payment, refund it.
+  </Card>
+  <Card title="Demo, no wallet needed" icon="play" href="https://demo.pactagent.app">
+    Every screen with sample data: merchant, customer, AI agent, attacker and accountant.
+  </Card>
+  <Card title="Merchant quickstart" icon="rocket" href="/merchant/quickstart">
+    Your first product and checkout link in about five minutes.
+  </Card>
+  <Card title="Add checkout to your app" icon="code" href="/integrate/embedded-checkout">
+    A React form, a restricted server route and a verified webhook.
+  </Card>
+</CardGroup>
+
+## What you can do with Pact
+
+| | What it is |
+| --- | --- |
+| [Checkout links](/merchant/quickstart) | A link per product. Share it anywhere, no code. |
+| [Embedded checkout](/integrate/embedded-checkout) | A React or Expo form that starts a hosted payment; the SDK packages are not published yet. |
+| [Subscriptions](/merchant/subscriptions) | Recurring billing under a price cap the customer signs |
+| [Refunds](/merchant/refunds) | Full or partial, verifiable onchain |
+| [Exports](/merchant/exports) | CSV for your accountant, with chain links for confirmed entries |
+| [Webhooks](/integrate/webhooks) | Signed events for orders, refunds, subscriptions and invoices |
+| [Agent payments](/integrate/agent-payments) | AI agents pay per request over x402 |
+| [Free trials](/merchant/free-trials) and [discounts](/merchant/discounts) | Trials on new plans; product checkout codes and subscription API discounts |
+
+<Note>These pages describe the repository implementation. Publishing the renamed SDK packages and deploying the new build are separate release steps.</Note>
+
+## Why settle in USDT onchain
+
+1. **A refund is a public record.** You refund, and the customer can check the amount and the original payment on the explorer. There are no chargebacks to dispute.
+2. **Subscription limits live in a contract.** The customer signs a price cap and a billing period. A renewal that is too early or too large is refused, and anyone can read the refusal and its reason.
+3. **You pay gas for your customers, with limits the chain enforces.** Each merchant has its own gas tank, a daily cap, replay protection and a function allowlist. A card network has nothing like it.
+4. **Settlement is fast and cheap.** Whitechain has one-second blocks, and a transfer costs about 0.000105 WBT. Small payments and same-block settlement work, which wires and cards can't do for global customers.
+
+## Who reads what
+
+- **Merchant** (this tab): run your business from the dashboard. No code needed.
+- **[Integrate](/agents/overview)**: your coding agent integrates Pact for you, from [`llms.txt`](https://docs.pactagent.app/llms.txt). SDKs, webhooks, API and contracts.
+- **[Customer](/customer/pay-with-email)**: for the people who pay you. Share these pages with your customers.

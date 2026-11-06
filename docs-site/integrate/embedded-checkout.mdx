@@ -1,0 +1,220 @@
+---
+title: Embedded checkout
+description: Start a USDT checkout from your React or Expo app, through a small server route that holds your secret key.
+---
+
+The component goes in your app and collects the customer's email and any questions you add. It then sends them to Pact's hosted checkout to sign in with that same email and pay. They never see a wallet popup, a network name or a gas fee.
+
+<Frame caption="Studio Supply's checkout form before the hosted payment redirect">
+  <img src="/images/embedded-checkout.png" alt="Embedded checkout" />
+</Frame>
+
+You need three things: the component in your frontend, a small route on your server that holds your secret key, and a [webhook](/integrate/webhooks) that fulfils the order.
+
+## 1. Install
+
+<Warning>
+The `@pactagent/*` packages are not published to npm yet, so this command fails for now. Until they are, use the [hosted checkout](#create-the-payment-on-your-server-instead) through the REST API, or run `examples/merchant-store` from this repository.
+</Warning>
+
+```bash
+pnpm add @pactagent/core @pactagent/checkout-react
+```
+
+## 2. Add the server route
+
+The component never sees your secret key. It posts to a route on your own server, which adds the key and calls Pact.
+
+Anyone can call this route, and it acts with your secret key. A route that forwards every request would let any visitor refund payments, read your orders, create API keys or choose their own price. So forward only the one request the checkout makes, and set the price on the server:
+
+```ts app/api/pact/[...path]/route.ts
+const PACT_API = 'https://api.pactagent.app';
+const ITEM = { id: 'pro-pass', name: 'Pro pass', amount: '12.50' };
+const FORBIDDEN_METADATA = ['invoiceId', 'paymentLinkId', 'store_item'];
+
+const refuse = (status: number, code: string) =>
+  Response.json({ error: { code, message: code } }, { status, headers: { 'cache-control': 'no-store' } });
+
+export async function POST(req: Request, { params }: { params: Promise<{ path: string[] }> }) {
+  // The only request this route forwards.
+  if ((await params).path.join('/') !== 'v1/payments') return refuse(404, 'not_found');
+  if (!process.env.PACT_SECRET_KEY) return refuse(503, 'store_not_configured');
+
+  const raw = await req.text();
+  if (raw.length > 64 * 1024) return refuse(413, 'too_large');
+  let body: Record<string, unknown> | null = null;
+  try { body = JSON.parse(raw); } catch { /* refused below */ }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return refuse(400, 'invalid_json');
+
+  // The browser can only ask to buy this item at this price.
+  if (body.amount !== ITEM.amount) return refuse(400, 'invalid_amount');
+
+  // Custom fields pass through. Values that Pact acts on, or that you rely on, do not.
+  const metadata = body.metadata ?? {};
+  if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) return refuse(400, 'invalid_metadata');
+  if (FORBIDDEN_METADATA.some((key) => Object.hasOwn(metadata, key))) return refuse(400, 'invalid_metadata');
+
+  const key = req.headers.get('idempotency-key');
+  try {
+    const res = await fetch(`${PACT_API}/v1/payments`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${process.env.PACT_SECRET_KEY}`,
+        ...(key && key.length <= 255 ? { 'idempotency-key': key } : {}),
+      },
+      body: JSON.stringify({
+        amount: ITEM.amount,
+        currency: 'USDT',
+        description: ITEM.name,
+        ...(typeof body.email === 'string' ? { email: body.email } : {}),
+        metadata: { ...metadata, store_item: ITEM.id },
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    return new Response(await res.text(), { status: res.status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  } catch {
+    return refuse(502, 'upstream_unavailable');
+  }
+}
+```
+
+```bash .env.local
+PACT_SECRET_KEY=sk_test_...
+```
+
+This route accepts one price. If you sell several items, have the browser send an item ID, and look up its price on your server. Add a limit on request rate before going to production.
+
+## 3. Add the checkout
+
+```tsx app/pay/page.tsx
+'use client';
+import { Checkout } from '@pactagent/checkout-react';
+
+export default function PayPage() {
+  return (
+    <Checkout
+      amount="12.50"
+      apiBaseUrl="/api/pact"
+      appearance={{ brand: { name: 'Acme' } }}
+      onSuccess={(payment) => {
+        window.location.assign(`/orders/confirm?payment_id=${encodeURIComponent(payment.id)}`);
+      }}
+      onError={(error) => console.error(error)}
+    />
+  );
+}
+```
+
+`amount` must match the price on your server exactly, including its format: this route refuses `"12.5"`.
+
+## What happens at checkout
+
+1. The customer enters their email and answers any questions you added, then clicks the button.
+2. The component posts to your route, which creates the payment and returns its `checkoutUrl`.
+3. The browser goes to `checkoutUrl`, on Pact's hosted checkout.
+4. The customer signs in with the **same email** they entered, and pays there. Someone signed in with a different email can't see or pay it.
+5. Pact sends the `payment.captured` webhook to your server once the payment confirms onchain.
+
+Because the Pact API always returns a `checkoutUrl`, the browser leaves your page at step 3. `onSuccess` and the receipt don't run in this flow, and the hosted checkout doesn't send the customer back to your app. They apply only when you pass your own `client` that returns a succeeded payment with no `checkoutUrl`.
+
+## 4. Fulfil the order from the webhook
+
+A payment made this way isn't a product order, so it sends `payment.captured` and not `order.paid`. Fulfil from that webhook, never from the browser.
+
+Verify the signature first, as shown on [Webhooks](/integrate/webhooks). Then check the two values your route controls:
+
+```ts
+if (event.type === 'payment.captured' && event.metadata?.store_item === 'pro-pass') {
+  if (event.amount_minor !== '12500000') throw new Error('Unexpected amount'); // 12.50 USDT
+  await fulfil(event.object_id, event.metadata); // object_id is the payment ID. Make this safe to repeat.
+}
+```
+
+The event also carries `data.amount`, `data.customer`, `data.tx_hash` and `data.metadata`.
+
+## Props
+
+| Prop | Type | Default | |
+| --- | --- | --- | --- |
+| `amount` | `string` | Required | Decimal USDT, for example `"12.50"` |
+| `onSuccess` | `(payment) => void` | Required | Called only for a succeeded payment with no `checkoutUrl`. See [What happens at checkout](#what-happens-at-checkout). |
+| `onError` | `(error) => void` | | Called when the payment can't be started |
+| `apiBaseUrl` | `string` | `"/api/pact"` | Your server route |
+| `client` | `PactClient` | | Pass your own client instead of `apiBaseUrl` |
+| `buttonLabel` | `string` | `"Continue to payment"` | |
+| `appearance` | `object` | | Brand name, logo, colors, radius. Try it in the [playground](https://pay.pactagent.app/playground). |
+| `locale` | `string` | `"en-US"` | A language tag for number formatting. Labels are in English, Spanish (`es`) or French (`fr`), and other languages use English. |
+| `paymentMethods` | `string[]` | `["usdt"]` | `"card"` and `"bank"` show as coming soon and can't be paid with |
+| `showReceipt` | `boolean` | `true` | Shows a receipt in the same case as `onSuccess` |
+| `fields` | `Field[]` | | Extra questions on the checkout. See below. |
+
+## Custom fields
+
+Ask the customer for anything you need with the order, such as a company name or a shipping note.
+
+```tsx
+<Checkout
+  amount="12.50"
+  apiBaseUrl="/api/pact"
+  onSuccess={() => {}}
+  fields={[
+    { key: 'company', label: 'Company name', type: 'text', required: true },
+    { key: 'seats', label: 'Number of seats', type: 'number' },
+    { key: 'terms', label: 'I accept the terms', type: 'checkbox', required: true },
+  ]}
+/>
+```
+
+`type` is `text`, `number` or `checkbox`. The component checks `required` fields and sends the answers as the payment's `metadata`. It's a flat object of at most 20 keys, with strings of up to 500 characters, numbers or booleans. Your route adds `store_item` to it, and Pact refuses keys it uses itself, such as `linkId`.
+
+The answers come back in the `payment.captured` webhook, and to your secret key from `GET /v1/payments/:id`. They don't appear on a dashboard order page, because this payment isn't an order. These checks run in the customer's browser, so validate anything that matters on your server.
+
+You can also add questions to a product or a new payment link in the dashboard, under **Checkout fields**. For those, Pact enforces `required` on its server, shows the answers on the order in your dashboard, and includes them in the webhook.
+
+## Expo
+
+```bash
+pnpm add @pactagent/core @pactagent/react-native expo-linking
+```
+
+```tsx App.tsx
+import * as Linking from 'expo-linking';
+import { PactClient, fetchTransport } from '@pactagent/core';
+import { PactCheckout } from '@pactagent/react-native';
+
+const client = new PactClient({ transport: fetchTransport('https://shop.example.com/api/pact') });
+
+export default function App() {
+  return (
+    <PactCheckout
+      amount="12.50"
+      client={client}
+      returnUrl={Linking.createURL('payment-return')}
+      onSuccess={(payment) => console.log('Paid', payment.id)}
+    />
+  );
+}
+```
+
+`amount`, `client` and `returnUrl` are required. `PactCheckout` also takes `onError`, `buttonLabel`, `appearance` and `fields`, and has no `locale`. It posts to the same server route as the web version, then opens `checkoutUrl` in the browser.
+
+The component calls `onSuccess` only when your app opens `returnUrl` with `payment_id` and `status=succeeded` in its query. The hosted checkout doesn't send the customer back there today, and a link like that can be forged. As on the web, fulfil from the webhook.
+
+## Create the payment on your server instead
+
+If you don't need the component, create the payment on your server and send the customer to its hosted checkout. This works today with no SDK:
+
+```ts
+const res = await fetch('https://api.pactagent.app/v1/payments', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.PACT_SECRET_KEY}` },
+  body: JSON.stringify({ amount: '12.50', email: 'ana@example.com', metadata: { orderId: 'A-1042' } }),
+});
+const payment = await res.json();
+// redirect the customer to payment.checkoutUrl
+```
+
+The customer signs in with the `email` you set, so include it. You get the same `payment.captured` webhook, with your `metadata`.
+
+Once the SDK is published, `createPactNodeClient` from `@pactagent/node` does the same with `pact.payments.create(...)`.

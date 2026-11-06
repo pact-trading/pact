@@ -1,0 +1,39 @@
+---
+title: USDT on Whitechain
+description: How customers pay in USDT without a wallet, a network switch or gas.
+---
+
+Pact's first payment method is USDT on Whitechain. Card payments are planned as a second method; your products, plans and links will not change when it arrives.
+
+## What the customer does
+
+1. Opens your checkout and clicks **Continue with email**.
+2. Enters the code sent to their inbox.
+3. Clicks **Pay**.
+
+That's all. They never install a wallet app, write down a seed phrase, pick a network, or hold WBT for gas. See [Pay with email](/customer/pay-with-email) for the customer's view.
+
+## What happens underneath
+
+| The customer sees | What Pact does |
+| --- | --- |
+| Sign in with email | Privy creates an account (an embedded wallet) tied to that email |
+| First payment | The USDT approval is sent for them with EIP-7702, paid from your gas tank. No WBT needed. |
+| **Pay** | They sign one message. Pact's relayer sends it through the Router, which charges the USDT and takes the gas back from **your** tank in the same transaction. |
+| Receipt | The payment is final in about one second (Whitechain has one-second blocks) and has an explorer link. |
+
+Because you pay the gas, a sponsored payment must be at least **1.00 USDT**, and Pact charges a small USDT fee that covers it. See [Gas tank](/merchant/gas-tank) for what it costs and [Drain protection](/merchant/drain-protection) for why nobody can abuse it.
+
+## Network details
+
+| | |
+| --- | --- |
+| Network | Whitechain Sepolia (testnet) |
+| Chain ID | `1874` |
+| RPC | `https://rpc.testnet.whitechain.io` |
+| USDT | `<USDT_ADDRESS>`, 6 decimals |
+| Gas token | WBT |
+
+## Card payments (coming soon)
+
+Card will appear as a second tab on the same checkout. You will choose per product whether to offer it.

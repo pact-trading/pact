@@ -1,0 +1,76 @@
+---
+title: Quickstart
+description: Your first product and checkout link on Whitechain Sepolia in about five minutes.
+---
+
+By the end of this page you will have a working checkout link, and you will have paid it yourself as a customer.
+
+<Note>
+This uses the testnet. Test WBT and USDT are free and have no value.
+</Note>
+
+## What you need
+
+- A browser wallet such as MetaMask. Pact adds the Whitechain Sepolia network for you.
+- A GitHub account, to claim free test WBT from the [Whitechain faucet](https://faucet.testnet.whitechain.io).
+
+<Steps>
+  <Step title="Sign in as a merchant">
+    Open [pay.pactagent.app/login](https://pay.pactagent.app/login) and click **Connect wallet**. Approve adding Whitechain Sepolia (chain 1874), then sign the sign-in message. Your wallet address is your merchant account, and it is where your USDT arrives.
+
+    <Frame caption="Demo preview sign-in; live merchants connect a wallet"><img src="/images/merchant-login.png" alt="Demo preview sign-in" /></Frame>
+  </Step>
+
+  <Step title="Get test WBT">
+    Claim WBT from [faucet.testnet.whitechain.io](https://faucet.testnet.whitechain.io). The faucet gives one drip per GitHub account every 24 hours.
+  </Step>
+
+  <Step title="Set up live payments">
+    On **Overview**, click **Set up live payments**. The card walks you through four steps:
+
+    1. Deposit **0.2 WBT** into your [gas tank](/merchant/gas-tank). Pact uses it to pay gas for your customers.
+    2. Set a **daily cap** for that tank.
+    3. Approve **fees and refunds**, so Pact can collect the small USDT fee per sponsored payment and send refunds you sign.
+    4. Swap **0.01 WBT** for fee USDT on the testnet DEX.
+
+    <Frame caption="Demo preview onboarding; live setup uses the steps above"><img src="/images/merchant-setup-card.png" alt="Demo preview onboarding" /></Frame>
+  </Step>
+
+  <Step title="Add your brand">
+    Open **Settings** and set your business name and logo. They appear on your checkout and receipts.
+  </Step>
+
+  <Step title="Create a product">
+    Open **Products**, click **New product**, enter a name and a price in USDT, and save it as **Active**. Copy its checkout link. It looks like this:
+
+    ```text
+    https://pay.pactagent.app/buy/prod_XXXXXXXX
+    ```
+  </Step>
+
+  <Step title="Pay it as a customer">
+    Open the link in a private window. Click **Continue with email** and sign in with an email address. The setup card offers **Swap 0.1 WBT to them**, which gives your test customer about 8 USDT. Then click **Pay** and confirm.
+
+    The customer never sees a wallet popup, a network name or a gas fee.
+
+    <Frame caption="Hosted checkout in the demo preview"><img src="/images/checkout-pay.png" alt="Demo hosted checkout" /></Frame>
+  </Step>
+
+  <Step title="See the order">
+    Back in your dashboard, open **Orders**. The order shows as paid, with a link to the transaction on the Whitechain block explorer.
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Let your agent integrate Pact" icon="robot" href="/agents/overview" />
+  <Card title="Refund the order" icon="rotate-left" href="/merchant/refunds" />
+  <Card title="Sell a subscription" icon="repeat" href="/merchant/subscriptions" />
+  <Card title="Get notified with webhooks" icon="bell" href="/integrate/webhooks" />
+  <Card title="Embed checkout in your app" icon="code" href="/integrate/embedded-checkout" />
+</CardGroup>
+
+<Tip>
+No wallet handy? The [demo](https://demo.pactagent.app) shows the same screens with sample data.
+</Tip>

@@ -1,0 +1,5 @@
+/* Bigger Pact logo in the docs header and sidebar */
+img.nav-logo {
+  height: 2.25rem !important;
+  max-width: 16rem !important;
+}

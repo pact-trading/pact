@@ -1,0 +1,52 @@
+---
+title: Free trials
+description: Let customers try a subscription plan before the first charge.
+---
+
+A free trial lets a customer start a subscription today and pay nothing until the trial ends. The customer signs up once. On V1 subscriptions, the first charge is attempted automatically when the trial ends.
+
+<Note>Automatic funded renewal for SubscriptionManager V2 is currently disabled in live mode; its trial and renewal charging is covered only in synthetic tests and local forks. Check `subscriptionVersion` before offering automatic V2 billing.</Note>
+
+## How a trial works
+
+1. **You add a trial to a new plan.** In the dashboard, open **Plans**, create a plan and set **Free trial (days)** to a number of days (for example 7, 14 or 30). Existing plans cannot have their trial length edited.
+2. **The customer subscribes.** At checkout the customer sees "Free for 14 days, then 20.00 USDT per month". They sign the subscription once: the price cap, the billing period and the end date. Nothing is charged today.
+3. **The trial runs.** The subscription has status `trialing`. The customer can use everything the plan includes.
+4. **Within three days before the end,** Pact sends you one `subscription.trial_will_end` webhook, so you can remind the customer. For a 1- or 2-day trial, the event arrives at the next keeper tick.
+5. **The trial ends.** For V1, Pact charges the first period. If it succeeds, the status becomes `active` and the normal billing cycle starts from that day.
+6. **If the V1 charge fails** (for example, the customer has too little USDT), the subscription becomes `past_due` and follows the normal [failed renewal](/merchant/subscriptions#failed-renewals) flow.
+
+## Cancelling during a trial
+
+The customer can cancel at any time from their [customer portal](/customer/subscriptions). If they cancel before the trial ends, they are never charged.
+
+You can also cancel a trial from the dashboard. Pact then stops all charges for that subscription.
+
+## What the customer is protected by
+
+The customer signs a price cap before the trial starts. When the trial ends, Pact can never charge more than that cap per period, and never more often than the billing period. These limits are enforced by the subscription contract on Whitechain, not just by Pact. Pact reports renewal refusals in subscription events and the dashboard.
+
+The length of the trial itself is enforced by Pact: Pact does not request the first charge until the trial has ended.
+
+## One trial per customer
+
+By default a customer can start one trial per plan. Pact checks this against the customer's Pact account. A customer who signs up again with a new email can start another trial. If that matters for your business, use a shorter trial, or a paid first period with a [discount](/merchant/discounts) instead.
+
+## Changing plans during a trial
+
+If a customer switches to another plan during a trial, the remaining trial days carry over. If the new plan has no trial, the first charge happens when the original trial would have ended.
+
+## For developers
+
+| Field or event | Where | What it is |
+| --- | --- | --- |
+| `trialDays` | Plan | Length of the trial in days. `0` or empty means no trial. |
+| `status: "trialing"` | Subscription | The trial is running and nothing has been charged. |
+| `trialEndsAt` | Subscription | When the first charge is due (ISO 8601, UTC). |
+| `subscription.created` | Webhook | Sent at sign-up, with `status: "trialing"`. |
+| `subscription.trial_will_end` | Webhook | Sent once when the end is within three days. |
+| `subscription.renewed` | Webhook | Sent when the first charge succeeds. |
+| `subscription.past_due` | Webhook | Sent if the first charge fails. |
+| `subscription.cancelled` | Webhook | Sent if the trial is cancelled. |
+
+Grant access when you receive `subscription.created` with `status: "trialing"`. Remove it on `subscription.cancelled`, or when the final `subscription.past_due` event has no next retry scheduled (`next_retry_at: null`).

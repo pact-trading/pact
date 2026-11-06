@@ -1,0 +1,123 @@
+---
+title: Webhooks
+description: Signed events for orders, refunds, subscriptions and invoices.
+---
+
+A webhook is an HTTP `POST` that Pact sends to your server when something happens: a customer paid, you refunded, a renewal was refused. Use it to ship orders, grant access, or update your books, without polling.
+
+Payment, refund and renewal settlement events follow confirmed chain activity. Pact also sends offchain events for actions such as invoice creation, reminders and merchant cancellation.
+
+## Set up an endpoint
+
+1. Open **Integration → Webhooks** and enter your URL, for example `https://shop.example.com/webhooks/pact`.
+2. Copy the **signing secret** (`whsec_…`) into your server's environment as `PACT_WEBHOOK_SECRET`.
+3. Click **Send test** to queue a test event. Then open **Deliveries** and confirm its last HTTP status is `200`; the button itself only confirms the event was queued.
+
+## Verify and handle an event
+
+Always verify the signature over the **raw** body, before parsing the JSON.
+
+```ts server.ts
+import express from 'express';
+import { webhooks } from '@pactagent/node';
+
+const app = express();
+
+app.post('/webhooks/pact', express.raw({ type: 'application/json' }), async (req, res) => {
+  const secret = process.env.PACT_WEBHOOK_SECRET;
+  if (!secret) return res.sendStatus(503);
+  const signature = req.header('x-settle-signature') ?? '';
+  const valid = await webhooks.verify(req.body, signature, secret);
+  if (!valid) return res.sendStatus(400);
+
+  let event;
+  try { event = JSON.parse(req.body.toString('utf8')); }
+  catch { return res.sendStatus(400); }
+  if (!event || event.id !== req.header('x-settle-event-id')) return res.sendStatus(400);
+  switch (event.type) {
+    case 'order.paid':
+      await shipOrderOnce(event.id, event.object_id); // your code: atomic event + order dedupe
+      break;
+    case 'subscription.past_due':
+      await emailCustomerOnce(event.id, event.object_id); // your code: dedupe by event ID
+      break;
+  }
+  res.sendStatus(200);
+});
+```
+
+Implement `shipOrderOnce` so recording the event ID and marking the order fulfilled happen in one database transaction. Give the order ID a unique constraint too: a second valid event for the same order must not ship it again. The repository's `examples/merchant-store/fulfillment.ts` shows a SQLite implementation.
+
+## Headers
+
+| Header | Example |
+| --- | --- |
+| `x-settle-signature` | `sha256=9f3c…` (HMAC-SHA256 of the raw body with your signing secret) |
+| `x-settle-event-id` | `evt_01HZY…` |
+| `x-settle-attempt` | `1` |
+| `idempotency-key` | Same for every retry of one event |
+
+## Payload
+
+```json
+{
+  "id": "evt_01HZY6K2Q4",
+  "api_version": "<YYYY-MM-DD>",
+  "type": "order.paid",
+  "object_id": "ord_7d21",
+  "occurred_at": "<ISO-8601 timestamp>",
+  "idempotency_key": "evt_01HZY6K2Q4",
+  "data": {
+    "amount": "20.000000",
+    "currency": "USDT",
+    "customer": "ana@example.com",
+    "tx_hash": "0x5a1f…015d",
+    "metadata": { "company": "Acme" }
+  },
+  "order": { "id": "ord_7d21", "metadata": { "company": "Acme" } },
+  "attempt": 1
+}
+```
+
+`idempotency_key` is the event ID and stays the same across retries; `attempt` increases. The example is a paid product order. Its payment details are in `data`, and the full order is also supplied as a top-level `order` object. Other event types have different context fields, so inspect the event type before reading them.
+
+## Events
+
+| Event | When |
+| --- | --- |
+| `order.paid` | A product checkout order was paid |
+| `order.refunded` | A product checkout order was fully or partly refunded |
+| `payment.captured` | A payment was captured onchain |
+| `payment.refunded` | A refund confirmed onchain |
+| `subscription.created` | A customer signed a mandate |
+| `subscription.trial_will_end` | A free trial ends within 3 days; sent once at the next keeper tick |
+| `subscription.renewed` | A renewal was charged |
+| `subscription.refused` | The contract refused a renewal (the reason is in top-level `reason`) |
+| `subscription.past_due` | A renewal failed for lack of funds |
+| `subscription.replaced` | The customer changed plan |
+| `subscription.cancelled` | The customer or you cancelled |
+| `intent.refused` | A signed payment intent was refused |
+| `transaction.failed` | A submitted transaction reverted |
+| `transaction.reconciliation_required` | A submitted transaction needs reconciliation |
+| `invoice.created` | An invoice was created |
+| `invoice.sent` | An invoice was marked sent; this event does not itself send an email |
+| `invoice.acknowledged` | The customer signed that they received it |
+| `invoice.reminder_due` | An invoice reminder became due |
+| `invoice.reminder` | A reminder event was recorded; delivery to the customer is your integration's responsibility |
+| `invoice.paid` | An invoice was paid in full |
+| `invoice.overdue` | An invoice passed its due date unpaid |
+| `webhook.test` | A test event sent from Integration |
+
+`GET /v1/webhooks/events` returns your recent event history, not a catalog of event names. A direct payment or payment link emits `payment.captured`; it does not create a product `order.paid` event.
+
+## Retries
+
+If your endpoint doesn't answer `2xx`, Pact makes up to **8 delivery attempts total**, starting the first retry after 1 second and doubling the delay each time, up to 1 hour apart. Every attempt has the same `idempotency-key`.
+
+Under **Integration → Webhooks → Deliveries** you can see each event's current delivery state, attempt count, last HTTP status and last error, and click **Replay** to send it again. The UI does not show a row for every individual attempt.
+
+## Email and Telegram notifications
+
+If you don't run a server, you can still get notified. Under **Settings → Notifications**, choose which events reach you by email, by Telegram, or both.
+
+To link Telegram, click **Connect Telegram**, open the Pact bot from the link, and press **Start**. The link holds a one-time token, so only you can connect your account. Your customers can do the same from their [portal](/customer/subscriptions) to hear about their own renewals and refunds. Telegram controls appear only when the bot is configured; the demo preview does not connect to a bot.

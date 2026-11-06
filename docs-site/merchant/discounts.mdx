@@ -1,0 +1,67 @@
+---
+title: Discounts
+description: Lower the price of products and plans with codes or links.
+---
+
+A discount lowers what a customer pays for a product or a subscription plan. Product and payment-link customers can enter a code at checkout, or open a link that already includes the code. Subscription discounts are currently applied through the subscription API.
+
+## Create a discount
+
+In the dashboard, open **Discounts** and click **New discount**.
+
+| Setting | Options |
+| --- | --- |
+| Type | **Percentage** (for example 20% off) or **Fixed amount** (for example 5.00 USDT off) |
+| Code | Letters and numbers, for example `LAUNCH20`. Customers type it at checkout. |
+| Applies to | All products and plans, or only the ones you pick |
+| Duration (plans only) | **Once** (first period only), **Repeating** (the first N periods) or **Forever** |
+| Limits | Maximum number of uses, start date, end date |
+
+You can archive a discount at any time. Existing subscriptions keep their discount terms for the duration you set. A use is counted when a checkout or subscription is created, even if the customer abandons it.
+
+## How customers use it
+
+- **At product or payment-link checkout:** the customer enters the code in the visible **Discount code** field. The checkout shows the original price, the discount and the new total before they pay.
+- **With a product or payment link:** add `?discount=LAUNCH20`. The code is applied automatically.
+
+The hosted subscription checkout does not yet have a discount-code field or a recurring-price preview. The subscription API accepts `discountCode` when creating a subscription.
+
+## How the price is calculated
+
+Pact calculates the discounted price on its server when the order is created. The customer's browser never sets the price. Once the customer confirms, the order amount is fixed.
+
+- **Percentage:** the discount is rounded to the nearest 0.000001 USDT (USDT has six decimals).
+- **Fixed amount:** the price can't go below zero.
+
+## Discounts on subscriptions
+
+When a customer subscribes with a discount, they still sign a price cap at the **full** plan price. Each period, Pact charges the discounted price for as long as the discount lasts, then the full price. Because the full price is within the cap the customer signed, the change needs no new signature.
+
+The subscription API returns the discount terms. The hosted subscription checkout does not yet display the discounted recurring-price schedule.
+
+## Minimum payment amount
+
+Payments where Pact pays the gas for the customer must be at least **1.00 USDT**. This protects your gas tank against spam payments of tiny amounts. If a discount brings a payment under 1.00 USDT, the checkout shows an error and the customer can't use that code for that product. Keep this in mind for low-priced products.
+
+A 100% discount is currently refused by the minimum-payment rule; it does not create a paid order.
+
+## Refunds and exports
+
+- A refund can never be larger than what the customer actually paid after the discount.
+- In the CSV export, each order has a gross amount, a discount amount and a net amount, plus the discount code.
+
+## For developers
+
+| Field or event | Where | What it is |
+| --- | --- | --- |
+| `discountCode` | Order, subscription and checkout creation request | The code that was applied |
+| `amountGross`, `amountDiscount` | Order | Price before the discount and the discount itself, as decimal USDT strings. The existing amount stays the amount actually paid. |
+| `discount.duration`, `discount.periods` | Subscription | `once`, `repeating` or `forever`, and how many periods are left |
+| `order.paid` | Webhook | Product orders include the discount fields above. Payment links instead emit `payment.captured`, with the discount in payment metadata. |
+| `subscription.renewed` | Webhook | The charged amount shows whether the discount is still active |
+
+Always read the amount from the order or the webhook. Never compute the discounted price in your own code.
+
+<Note>
+The dashboard and customer portal do not yet show a subscription's discount. For V2 funded renewals, the signed grant binds one exact charge amount; when a temporary discount ends, the customer must authorize a new grant for the full amount before those renewals continue.
+</Note>

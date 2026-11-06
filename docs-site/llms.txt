@@ -1,0 +1,50 @@
+# Pact
+
+> Pact lets a business get paid in USDT on Whitechain: hosted checkout, React and Expo checkout starters, payment links, subscriptions, refunds, exports and signed webhooks. Customers pay with an email sign-in, with no wallet, seed phrase or gas. These docs are written so a coding agent can integrate Pact for the merchant.
+
+Network: Whitechain Sepolia testnet (chain ID 1874). API: https://api.pactagent.app with `Authorization: Bearer $PACT_SECRET_KEY`. Hosted checkout: https://pay.pactagent.app.
+
+## Instructions for agents
+
+- Start with the [Agent runbook](https://docs.pactagent.app/agents/runbook.md) and follow it in order.
+- Keep `PACT_SECRET_KEY` and `PACT_WEBHOOK_SECRET` on the server. Never print, log, commit or bundle them.
+- Decide prices on the server. Amounts are decimal USDT strings such as "12.50"; the minimum is "1.00".
+- Fulfil direct payments only from a verified `payment.captured` webhook; product checkouts also emit `order.paid`. Verify `x-settle-signature` (HMAC-SHA256 of the raw body) before parsing, and dedupe on the event `id` and your own order identifier.
+- Stop and ask the human for anything that needs their wallet: signing in, creating API keys, funding the gas tank, approvals and refunds.
+- Use only the endpoints in [API for agents](https://docs.pactagent.app/agents/api.md). Don't invent others.
+- The `@pactagent/*` npm packages may not be published yet. Check with `npm view` and fall back to the REST API.
+
+## Integrate
+
+- [Integrate with your agent](https://docs.pactagent.app/agents/overview.md): What the merchant does, what the agent does, and the prompt to hand off.
+- [Agent runbook](https://docs.pactagent.app/agents/runbook.md): Step-by-step integration, webhook handling and verification checklist.
+- [API for agents](https://docs.pactagent.app/agents/api.md): Every endpoint callable with a secret key, with request and response shapes.
+- [How Pact works](https://docs.pactagent.app/integrate/how-pact-works.md): The pieces between the app, the customer and Whitechain.
+- [Embedded checkout](https://docs.pactagent.app/integrate/embedded-checkout.md): React and Expo checkout components and the server proxy route.
+- [Webhooks](https://docs.pactagent.app/integrate/webhooks.md): Payload, headers, event types and retries.
+- [Agent payments (x402)](https://docs.pactagent.app/integrate/agent-payments.md): Charge AI agents per request in USDT through Pact's x402 facilitator.
+- [Contracts](https://docs.pactagent.app/integrate/contracts.md): The contract set, functions and rules on Whitechain.
+
+## Merchant
+
+- [Introduction](https://docs.pactagent.app/index.md): What Pact does and why it settles onchain.
+- [Quickstart](https://docs.pactagent.app/merchant/quickstart.md): Sign in, set up live payments, first product and checkout link.
+- [Billing models](https://docs.pactagent.app/merchant/billing-models.md): One-time, subscriptions, invoices and tips.
+- [Free trials](https://docs.pactagent.app/merchant/free-trials.md): Trial days on subscription plans.
+- [Discounts](https://docs.pactagent.app/merchant/discounts.md): Discount codes and links.
+- [Refunds](https://docs.pactagent.app/merchant/refunds.md): Full and partial refunds, verifiable onchain.
+- [Subscriptions](https://docs.pactagent.app/merchant/subscriptions.md): Recurring billing under a signed price cap.
+- [Exports](https://docs.pactagent.app/merchant/exports.md): Accounting CSV reconciled to the chain.
+- [USDT on Whitechain](https://docs.pactagent.app/merchant/crypto.md): How customers pay without a wallet or gas.
+- [Gas tank](https://docs.pactagent.app/merchant/gas-tank.md): How the merchant sponsors customer gas.
+- [Drain protection](https://docs.pactagent.app/merchant/drain-protection.md): The limits that protect the gas tank.
+
+## Customer
+
+- [Pay with email](https://docs.pactagent.app/customer/pay-with-email.md): How a customer pays.
+- [Your subscriptions](https://docs.pactagent.app/customer/subscriptions.md): Manage and cancel subscriptions.
+- [Your refunds](https://docs.pactagent.app/customer/refunds.md): See and verify a refund.
+
+## Optional
+
+- [Full text of every page](https://docs.pactagent.app/llms-full.txt)

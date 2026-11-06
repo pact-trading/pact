@@ -1,0 +1,73 @@
+---
+title: Subscriptions
+description: Recurring billing under a price cap your customer signs once and can verify onchain.
+---
+
+A subscription sets a recurring price under limits your customer signs up front. The subscription contract on Whitechain enforces the cap and billing period. Automatic charging currently operates for V1 subscriptions; see the V2 status under **Renewals** below.
+
+<Frame caption="Plans list with subscriber counts in the demo preview">
+  <img src="/images/merchant-plan.png" alt="Plans list with subscriber counts" />
+</Frame>
+
+## Create a plan
+
+Open **Plans** and click **New plan**.
+
+| Setting | Example |
+| --- | --- |
+| Name | API Growth |
+| Price per period | 20.00 USDT |
+| Billing period | Monthly. On the testnet you can also pick 2 or 10 minutes, to watch renewals happen. |
+| Free trial | 14 days (see [Free trials](/merchant/free-trials)) |
+
+Share the plan's subscribe link (`/subscribe/<plan-id>`).
+
+## What the customer signs
+
+When the customer subscribes, they sign one message called a **mandate**:
+
+- the plan, and you as the merchant,
+- the **maximum amount per period** (the cap),
+- the **period length**,
+- the maximum number of periods and an end date.
+
+They also approve USDT for up to 12 periods. Both steps are free for the customer: Pact pays the gas.
+
+## Renewals
+
+<Note>Automatic keeper charging and the retry flow below run for SubscriptionManager V1. V2 funded renewals are enabled in synthetic tests and local forks but are currently disabled in live mode. Check the API's `subscriptionVersion` before promising automatic V2 billing to customers.</Note>
+
+Pact's keeper charges each period when it's due. Before moving any USDT, the contract checks every rule. If one fails, the charge is refused, and the refusal is recorded onchain with its reason.
+
+| Refusal reason | Meaning |
+| --- | --- |
+| `too_early` | The period hasn't passed since the last charge |
+| `cap_exceeded` | The amount is above what the customer signed |
+| `cancelled` | The customer cancelled |
+| `expired` | The mandate passed its end date |
+| `max_periods` | All signed periods have been charged |
+| `insufficient_funds` | The customer has too little USDT or allowance |
+| `transfer_failed` | The token transfer failed |
+
+On a V1 plan's subscriber, **Run renewal now** sends a charge right away, even when it's early. Use it to see a `too_early` refusal for yourself. A V2 early request is refused by the API before a transaction is sent.
+
+### Failed renewals
+
+If a renewal fails because the customer doesn't have enough USDT:
+
+1. The subscription becomes **past due**, and you receive a `subscription.past_due` webhook.
+2. Pact retries once a day, up to three times.
+3. If every retry fails, the subscription is **paused**.
+
+## Plan changes
+
+A customer can move to another plan from their portal. The new mandate replaces the old one in a single transaction, so there is never a moment with two active subscriptions.
+
+## Cancelling
+
+- **The customer** cancels from their [portal](/customer/subscriptions) at any time. It's free and takes effect in the next block. Any later charge is refused as `cancelled`.
+- **You** can cancel a subscription from the dashboard: open the subscriber and click **Cancel subscription**. Pact stops all further charges and sends a `subscription.cancelled` webhook.
+
+## Webhooks
+
+`subscription.created`, `subscription.renewed`, `subscription.refused`, `subscription.past_due`, `subscription.replaced` and `subscription.cancelled`. See [Webhooks](/integrate/webhooks).

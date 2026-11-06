@@ -1,0 +1,50 @@
+---
+title: Drain protection
+description: Eight limits stop anyone from spending your gas tank. Five of them are enforced by the contracts.
+---
+
+Any system that pays gas for strangers is a target: an attacker can try to spam it, replay old requests, send dust, or make the relayer run their own transactions. Pact stops all of these with eight layered limits. The first five live in the contracts on Whitechain, so they hold even if Pact's servers are compromised.
+
+## The eight layers
+
+| # | Layer | Enforced in | Stops | Refusal reasons |
+| --- | --- | --- | --- | --- |
+| 1 | Function allowlist | Contract | Using the relayer to run any transaction. The Router only calls Pact's own functions (pay, refund, renew, cancel, invoice actions) on Pact's own contracts. | `wrong_selector`, `data_hash`, `target_refused`, `invalid_address` |
+| 2 | Per-merchant gas tank | Contract | One merchant's gas paying for another merchant's traffic | `tank_limit`, `quote_mismatch`, `merchant_mismatch` |
+| 3 | Daily caps per payer and per merchant | Contract | Spam from one payer (max **40** sponsored calls a day) or one merchant (your daily cap) | `payer_daily_cap`, `merchant_daily_sponsorship_cap` |
+| 4 | Minimum amount, fee covers gas | Contract | Dust payments at your expense. A sponsored call must be at least **1.00 USDT**. | `dust`, `fee_too_low`, `fee_unavailable` |
+| 5 | Signature, nonce and deadline | Contract | Replays and stale requests. Every intent is signed (EIP-712), used once, and expires. | `invalid_signature`, `replay`, `deadline` |
+| 6 | Simulate before broadcast | Relayer | Paying gas for a transaction that would fail. On Whitechain, failed transactions are still charged. | `simulation_refused`, `target_failed` |
+| 7 | Gas caps per call | Relayer | Gas price spikes and gas-heavy calls. Max **1,000,000** gas and **100 gwei** per call. | `gas_limit`, `gas_price` |
+| 8 | Hot wallet float and circuit breaker | Relayer | A bug or leaked key emptying the relayer. It holds a small float, and pauses sponsorship if spend per minute spikes. | `circuit_open`, `circuit_budget`, `merchant_circuit_budget` |
+
+Every refusal is recorded with its reason. Open **Security** in the dashboard to see how many attempts each layer has blocked.
+
+<Frame caption="Security: blocked attempts per layer">
+  <img src="/images/merchant-security.png" alt="Security page with eight layers" />
+</Frame>
+
+## Run the drain attack yourself
+
+You don't have to take our word for it. On **Security**, click **Run the drain attack**. Pact creates fresh attacker keys and tries, against your own tank:
+
+- spam from many new accounts,
+- replaying a signed intent,
+- dust payments under 1.00 USDT,
+- arbitrary calldata to a contract that isn't Pact's.
+
+Every attempt is refused, each with its reason, and your tank balance doesn't move. The attack goes through a preflight that can never sign or send, so it costs you nothing.
+
+From the repository you can run the same attack from a terminal:
+
+```bash
+pnpm --dir apps/api exec tsx scripts/drain-attack.ts
+```
+
+Or watch it in the [demo](https://demo.pactagent.app): **Attacker → Run the drain attack**.
+
+## What you control
+
+- Your **daily cap**, under [Gas tank](/merchant/gas-tank).
+- Withdrawing your WBT at any time.
+- Which payments you sponsor: under 1.00 USDT, refunds and payments go [from your own wallet](/merchant/refunds).

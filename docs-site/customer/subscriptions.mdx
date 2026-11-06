@@ -1,0 +1,41 @@
+---
+title: Your subscriptions
+description: See, change and cancel your subscriptions, and what a business is allowed to charge you.
+---
+
+When you subscribe, you sign a **mandate**: the most the business may charge you each period, how often, and until when. A contract on Whitechain holds the business to it. They can't charge more, or sooner, even by mistake.
+
+<Frame caption="Subscriptions in the customer portal">
+  <img src="/images/customer-subscriptions.png" alt="Customer subscriptions" />
+</Frame>
+
+## See your subscriptions
+
+Open [pay.pactagent.app/portal](https://pay.pactagent.app/portal), sign in with your email, and click **Subscriptions**. For each one you see:
+
+- the plan and the price,
+- the maximum per period you signed,
+- the next charge date,
+- every past charge, with an explorer link.
+
+## Free trials
+
+If the plan has a free trial, you aren't charged until it ends. Pact records one reminder event when the trial is within 3 days of ending; you receive an email if your account has an address and trial reminders are enabled. Cancel before then and you pay nothing.
+
+## Change plan
+
+Click **Switch plan** and pick another. You sign a new mandate, and it replaces the old one in one step, so you are never billed for both.
+
+## Cancel
+
+Click **Cancel subscription**. Signing is free; wait for the cancellation to confirm. After that, the contract refuses any further charge from the business. Your access until the end of the paid period depends on the business's policy.
+
+## If a charge fails
+
+<Note>The automatic charging and retry flow below currently applies to V1 subscriptions. V2 funded renewals are disabled in live mode; ask the business which version its plan uses before relying on automatic renewal.</Note>
+
+If you don't have enough USDT when a renewal is due, the subscription becomes **past due**. Pact sends an email when your account has an address and failed-renewal notifications are enabled. We try again once a day, three times. Add USDT before then to keep your subscription.
+
+## Get notified
+
+Under **Account → Notifications**, choose to hear about renewals, failed charges and refunds by email. Telegram controls appear when the Pact bot is configured; then click **Connect Telegram** and press **Start** in the bot.

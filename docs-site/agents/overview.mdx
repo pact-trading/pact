@@ -1,0 +1,84 @@
+---
+title: Integrate with your agent
+description: You do two minutes of setup. Your coding agent reads these docs and builds the whole Pact integration.
+---
+
+You don't write the integration yourself. You give your coding agent (Claude Code, Codex, Cursor or any agent that can read a URL) one prompt, and it reads [`llms.txt`](https://docs.pactagent.app/llms.txt), then installs, wires and tests Pact in your app.
+
+Start with two merchant setup steps before handing the integration to your agent.
+
+<Steps>
+  <Step title="Sign in and set up live payments (you)">
+    Open [pay.pactagent.app/login](https://pay.pactagent.app/login), connect your wallet, and finish the **Set up live payments** card on **Overview**: fund the gas tank, set a daily cap, approve fees and refunds. The [quickstart](/merchant/quickstart) walks through it.
+  </Step>
+  <Step title="Create a secret key (you)">
+    Open **Integration → API keys**, create a **secret** key and put it in your app's environment as `PACT_SECRET_KEY`. Don't paste it into the chat with your agent: tell the agent the variable name instead.
+  </Step>
+  <Step title="Hand off to your agent">
+    Paste this prompt into your coding agent, in the root of your app's repository:
+
+    ```text Prompt for your coding agent
+    Integrate Pact payments (USDT on Whitechain) into this app.
+
+    1. Read https://docs.pactagent.app/llms.txt, then follow
+       https://docs.pactagent.app/agents/runbook.md step by step.
+    2. My secret key is already in the environment as PACT_SECRET_KEY.
+       Never print it, log it, commit it, or send it to the browser.
+    3. Build: a server route that creates payments, a checkout page or
+       redirect, and a webhook endpoint that verifies signatures and
+       fulfils orders on payment.captured for direct payments (or
+       order.paid for product checkouts).
+    4. Register the webhook with the Pact API yourself and store the
+       returned signing secret as PACT_WEBHOOK_SECRET.
+    5. Run the verification checklist in the runbook and show me the
+       results. Stop and ask me before anything that needs my wallet.
+    ```
+  </Step>
+</Steps>
+
+## What your agent can and can't do
+
+| Your agent can do with `PACT_SECRET_KEY` | Ask you before doing |
+| --- | --- |
+| Create payments and hosted checkout URLs | Sign in to the dashboard |
+| Create payment links, read products and orders | Create or revoke API keys |
+| Register the webhook URL and get its signing secret | Fund the gas tank and set its daily cap |
+| Send test webhooks, list deliveries, replay events | Approve fees and refunds onchain |
+| Read payments, orders and settings | Sign a refund |
+| Add the embedded checkout component to your app | Change who controls the merchant account |
+
+The runbook tells the agent to stop and ask you when it reaches a step in the right column. The API does permit secret-key key management; treating key creation and revocation as human-approved actions is an agent policy, not a technical block.
+
+## Give the agent permanent context
+
+Add this to the `AGENTS.md` or `CLAUDE.md` in your repository, so every future agent session knows how Pact is wired:
+
+```markdown AGENTS.md
+## Payments: Pact
+
+- Docs for agents: https://docs.pactagent.app/llms.txt (full text: /llms-full.txt)
+- API: https://api.pactagent.app, bearer `PACT_SECRET_KEY` (server only)
+- Webhooks: verify `x-settle-signature` (HMAC-SHA256 of the raw body with
+  `PACT_WEBHOOK_SECRET`) before parsing. Dedupe on the event `id`.
+- Fulfil direct payments only from a verified `payment.captured` webhook;
+  product orders may use `order.paid`. Never fulfil from a browser callback.
+- Amounts are decimal USDT strings, for example "12.50". Minimum 1.00.
+- Network: Whitechain Sepolia testnet, chain ID 1874.
+```
+
+## Files for agents
+
+| URL | What it is |
+| --- | --- |
+| [`/llms.txt`](https://docs.pactagent.app/llms.txt) | Index of every page, with rules for agents at the top |
+| [`/llms-full.txt`](https://docs.pactagent.app/llms-full.txt) | Every page in one plain-text file |
+| `/<page>.md` | Any page as Markdown, for example [`/agents/runbook.md`](https://docs.pactagent.app/agents/runbook.md) |
+
+<CardGroup cols={2}>
+  <Card title="Agent runbook" icon="list-check" href="/agents/runbook">
+    The exact steps your agent follows.
+  </Card>
+  <Card title="API for agents" icon="terminal" href="/agents/api">
+    Every endpoint an agent can call with a secret key.
+  </Card>
+</CardGroup>

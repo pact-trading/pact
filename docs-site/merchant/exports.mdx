@@ -1,0 +1,73 @@
+---
+title: Exports
+description: A CSV your accountant can import, with transaction links for confirmed onchain entries.
+---
+
+Pact-hosted payments, refunds, renewals and fees land in one ledger. Export it for any date range and hand it to your accountant. Confirmed onchain entries include a transaction hash and explorer link. Invoice rows can also appear before payment and have blank transaction fields. Calls settled through middleware on your own API are not yet included.
+
+<Frame caption="Exports with the reconciliation summary">
+  <img src="/images/merchant-exports.png" alt="Exports page" />
+</Frame>
+
+## Download a CSV
+
+1. Open **Exports**.
+2. Pick a date range (dates are in UTC).
+3. Click **Export CSV**, review the range and summary, then click **Download CSV**. Use **JSON** for your own tools.
+
+Confirmed onchain entries and invoice records are exported. Pending payments are not included until they confirm.
+
+## Columns
+
+| Column | Example | Notes |
+| --- | --- | --- |
+| `Date (UTC)` | `<YYYY-MM-DDThh:mm:ss.sssZ>` | Confirmed block time for chain entries; creation time for invoice rows |
+| `Type` | `Payment`, `Refund`, `Subscription`, `Fee`, `Invoice` | Fees have their own rows |
+| `Payment or Invoice ID` | `0x8f2c…` | |
+| `Order ID` | `ord_7d21` | Set for product orders; may be blank for direct or payment-link payments |
+| `Customer` | `ana@example.com` | Payment rows may show an email; subscription rows use the payer's wallet address |
+| `Gross USDT` | `20.000000` | Negative for a refund |
+| `Discount USDT` | `5.000000` | Discount applied to an order |
+| `Discount Code` | `LAUNCH20` | Blank when no code was used |
+| `Fee USDT` | `0.050000` | Quoted fee; fee entries also appear as separate rows |
+| `Net USDT` | `20.000000` | This row's amount after its own fee; payment and fee usually have separate rows |
+| `Gas Cost WBT` | `0.000142…` | Gas paid from your [gas tank](/merchant/gas-tank) |
+| `Gas Cost USD Estimate` | `0.000100` | At the rate shown on the export |
+| `Refund Of` | `0x8f2c…` | Set on refund rows: the original payment |
+| `Financing Status` | | Empty unless an invoice was financed |
+| `Transaction Hash` | `0x5a1f…015d` | Blank for invoice rows without a chain transaction |
+| `Explorer Link` | `https://<block-explorer>/tx/0x…` | Blank when there is no transaction hash |
+| `Token Balance Change USDT` | `19.950000` | How much your USDT balance moved |
+
+The last row is a `TOTAL` for confirmed accounting entries; invoice rows do not add to it. Refunds are negative entries tied to the original payment. A payment row's `Net USDT` is usually the captured amount because its fee has a separate `Fee` row. The `TOTAL` net combines payment, refund, discount and fee effects.
+
+```csv
+"Date (UTC)","Type","Payment or Invoice ID","Order ID","Customer","Gross USDT","Discount USDT","Discount Code","Fee USDT","Net USDT",...
+"<timestamp>","Payment","0x8f2c…","ord_7d21","ana@example.com","20.000000","0.000000","","0.000000","20.000000",...
+"<timestamp>","Refund","0x31a9…","ord_7d21","ana@example.com","-5.000000","0.000000","","0.000000","-5.000000",...
+```
+
+## Reconciliation
+
+Above the download button, **Reconciliation** compares the ledger with the chain: the number of events, the totals, and any row whose transaction can't be found. On a healthy account every line is green.
+
+## Import into QuickBooks or Xero
+
+The column names follow the bank-statement CSV that QuickBooks and Xero accept. Map `Date (UTC)`, `Gross USDT` and `Customer` to Date, Amount and Payee; put `Transaction Hash` in Reference.
+
+## Export from your server
+
+```ts
+import { createPactNodeClient } from '@pactagent/node';
+
+const pact = createPactNodeClient({ apiKey: process.env.PACT_SECRET_KEY!, baseUrl: 'https://api.pactagent.app' });
+
+const csv = await pact.export({ format: 'csv', from: '<start-date>', to: '<end-date>' });
+```
+
+Or call the API directly:
+
+```bash
+curl "https://api.pactagent.app/v1/export?from=<start-date>&to=<end-date>&format=csv" \
+  -H "Authorization: Bearer $PACT_SECRET_KEY" -o pact-export.csv
+```

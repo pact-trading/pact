@@ -1,0 +1,190 @@
+---
+title: Agent runbook
+description: Step-by-step instructions for a coding agent integrating Pact into a merchant's app. Follow them in order.
+---
+
+<Note>
+This page is written for AI coding agents. A human merchant can read it to see what their agent will do.
+</Note>
+
+## Rules
+
+Follow these on every step.
+
+1. **The secret key stays on the server.** Read `PACT_SECRET_KEY` from the environment. Never print, log, commit or bundle it into client code. If it is missing, stop and ask the human to create one under **Integration → API keys** on [pay.pactagent.app](https://pay.pactagent.app).
+2. **Fulfil only from a verified webhook.** A browser `onSuccess` callback or a redirect is not proof of payment. For payments created in step 3a, ship, grant access or mark paid only after a verified `payment.captured` webhook. Product checkouts also emit `order.paid`; handle one event type per order to avoid duplicate fulfilment.
+3. **Verify webhook signatures over the raw body**, before parsing JSON. Reject with `400` if invalid.
+4. **Be idempotent.** Pact makes at most 8 delivery attempts with the same event `id`. Record event IDs and payment IDs with unique constraints in the same database transaction that marks an order paid. Answer `200` to repeats.
+5. **Amounts are decimal USDT strings**, for example `"12.50"`. The minimum payment is `"1.00"`. Never use floats for money.
+6. **Stop and ask the human** before anything that needs their wallet: funding the gas tank, approvals, refunds, creating or revoking keys.
+7. **Don't invent endpoints.** Use only what is on this page and [API for agents](/agents/api). If something you need isn't there, tell the human.
+
+## Facts
+
+| | |
+| --- | --- |
+| API base URL | `https://api.pactagent.app` |
+| Auth | `Authorization: Bearer $PACT_SECRET_KEY` |
+| Hosted checkout | `https://pay.pactagent.app` |
+| Network | Whitechain Sepolia testnet, chain ID `1874` |
+| Currency | USDT (test tokens, no monetary value) |
+| Webhook signature header | `x-settle-signature: sha256=<hex>` |
+| Webhook event id header | `x-settle-event-id` |
+
+## Step 1. Check the key works
+
+```bash
+curl -sS https://api.pactagent.app/v1/config \
+  -H "Authorization: Bearer $PACT_SECRET_KEY"
+```
+
+Expect `200` with `chainId: 1874` and the merchant address. `401` means the key is wrong or revoked: stop and ask the human. Don't echo the key while debugging.
+
+## Step 2. Detect the stack
+
+Look at the repository and pick one path:
+
+| You find | Do |
+| --- | --- |
+| Next.js (App Router) | Steps 3a, 4, 5 with the Next.js snippets |
+| Express, Hono, Fastify or another Node server | Steps 3a, 4, 5 with the Node snippets |
+| React app with its own server | Step 3b (embedded checkout) after step 3a |
+| Expo app | Step 3b with `PactCheckout`, pointing at the server route |
+| No server at all | Use payment links (step 3c). Tell the human that webhooks need a server, or use email or Telegram notifications from **Settings → Notifications** (email needs an address; Telegram needs a configured bot). |
+
+## Step 3a. Create payments on the server
+
+Call the REST API directly. It needs no SDK and works in any language.
+
+```ts lib/pact.ts
+const PACT_API = 'https://api.pactagent.app';
+
+export async function createPayment(input: { amount: string; email: string; description?: string; metadata?: Record<string, string | number | boolean> }) {
+  const res = await fetch(`${PACT_API}/v1/payments`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.PACT_SECRET_KEY}` },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(`Pact ${res.status}: ${await res.text()}`);
+  return (await res.json()) as { id: string; amount: string; status: 'pending'; checkoutUrl: string };
+}
+```
+
+Decide the price on the server from your own product data. Never trust an amount sent by the browser. Supply the customer's email so that only the account signed in with that address can open the hosted payment. Put your own order id in `metadata` so the webhook can find the order:
+
+```ts app/api/checkout/route.ts
+import { createPayment } from '@/lib/pact';
+
+export async function POST(req: Request) {
+  const { orderId } = await req.json();
+  const order = await getOrder(orderId);            // your code: load the order and its price
+  const payment = await createPayment({ amount: order.total, email: order.customerEmail, metadata: { orderId: order.id } });
+  await savePaymentId(order.id, payment.id);        // your code
+  return Response.json({ checkoutUrl: payment.checkoutUrl });
+}
+```
+
+Then redirect the customer to `checkoutUrl`. The customer signs in with email and pays. No wallet is needed.
+
+## Step 3b. Embedded checkout (optional)
+
+If the app should show the checkout form on its own page, add the [React checkout component](/integrate/embedded-checkout). The component collects an email, then sends the customer to Pact's hosted page to sign in and pay. It needs a restricted server route so the browser never sees the secret key.
+
+The SDK packages `@pactagent/core`, `@pactagent/checkout-react` and `@pactagent/react-native` may not be on npm yet. Check before installing:
+
+```bash
+npm view @pactagent/checkout-react version
+```
+
+If that fails, use step 3a (hosted checkout redirect) and tell the human the embedded component isn't published yet.
+
+## Step 3c. Payment links (no code)
+
+```bash
+curl -sS https://api.pactagent.app/v1/payment-links \
+  -H "Authorization: Bearer $PACT_SECRET_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"kind":"product","name":"Pro plan","amount":"12.50"}'
+```
+
+The response `url` is a shareable checkout link. `kind` is `product` or `tip` (no fixed amount). For subscriptions, share the plan's `/subscribe/<plan-id>` URL instead.
+
+## Step 4. Handle webhooks
+
+Add an endpoint that reads the raw body, verifies it, dedupes and fulfils. No SDK is needed:
+
+```ts app/api/webhooks/pact/route.ts
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+function verify(raw: string, header: string, secret: string) {
+  if (!secret || !header.startsWith('sha256=')) return false;
+  const expected = createHmac('sha256', secret).update(raw).digest('hex');
+  const got = header.slice(7);
+  return /^[0-9a-f]{64}$/i.test(got) && timingSafeEqual(Buffer.from(got, 'hex'), Buffer.from(expected, 'hex'));
+}
+
+export async function POST(req: Request) {
+  const raw = await req.text();                                   // raw body, before JSON.parse
+  if (!verify(raw, req.headers.get('x-settle-signature') ?? '', process.env.PACT_WEBHOOK_SECRET ?? '')) {
+    return new Response('bad signature', { status: 400 });
+  }
+  let event: Record<string, any>;
+  try { event = JSON.parse(raw); } catch { return new Response('bad JSON', { status: 400 }); }
+  if (!event || typeof event !== 'object' || typeof event.id !== 'string' || event.id !== req.headers.get('x-settle-event-id')) {
+    return new Response('bad event', { status: 400 });
+  }
+  if (event.type === 'payment.captured') {
+    const orderId = event.data?.metadata?.orderId; // your own id from step 3a
+    if (typeof orderId !== 'string') {
+      await reportUnmatchedPayment(event.id, event.object_id); // your code: alert; don't silently lose it
+      return new Response('unmatched payment');
+    }
+    await markPaidOnce({ eventId: event.id, orderId, paymentId: event.object_id, amountMinor: event.amount_minor }); // your code
+  }
+  return new Response('ok');
+}
+```
+
+Implement `markPaidOnce` as one database transaction: insert the event ID with a unique constraint, verify the payment belongs to `orderId` and has the expected amount, then mark that order paid only once using a unique payment ID. A retry or a second valid event for the same payment must not fulfil again. Handle `payment.refunded` similarly if your app tracks refunds. The repository's `examples/merchant-store/fulfillment.ts` shows a SQLite pattern.
+
+For Express, use `express.raw({ type: 'application/json' })` on this route so the body stays raw.
+
+## Step 5. Register the webhook
+
+Once the endpoint is deployed on a public HTTPS URL, register it. You can do this yourself:
+
+```bash
+curl -sS https://api.pactagent.app/v1/webhooks/config \
+  -H "Authorization: Bearer $PACT_SECRET_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://shop.example.com/api/webhooks/pact"}'
+```
+
+The response has `signingSecret` (`whsec_…`). Store it as `PACT_WEBHOOK_SECRET` in the server environment and your host's secret store. Don't print it in the chat. Calling this again rotates the secret.
+
+`http://localhost` is accepted for local testing. Any other URL must be HTTPS.
+
+## Step 6. Verify
+
+Run every check and report the results to the human.
+
+1. **Key:** step 1 returns `200`.
+2. **Payment:** create a `"1.00"` payment and check that `checkoutUrl` opens.
+3. **Webhook delivery:**
+   ```bash
+   curl -sS -X POST https://api.pactagent.app/v1/webhooks/test -H "Authorization: Bearer $PACT_SECRET_KEY"
+   curl -sS https://api.pactagent.app/v1/webhooks/deliveries -H "Authorization: Bearer $PACT_SECRET_KEY"
+   ```
+   The latest delivery should have `last_http_status: 200`. On failure, read `last_error`, fix it, and replay with `POST /v1/webhooks/events/{id}/replay`.
+4. **Signature:** a request to your webhook with a wrong signature returns `400`.
+5. **Idempotency:** replaying the same event doesn't fulfil the order twice.
+6. **Secrets:** search the client bundle and git history for `sk_test_` and `whsec_`. There must be no matches.
+7. **End to end (needs the human):** ask the human to pay the test checkout with an email sign-in, then confirm your app marked the order paid from the webhook.
+
+## Done when
+
+- Payments are created on the server with a server-side price.
+- The customer reaches the hosted or embedded checkout.
+- `payment.captured` is verified, deduped and fulfils the order created in step 3a.
+- No secret is in client code, logs or git.
+- The human has the verification results.
