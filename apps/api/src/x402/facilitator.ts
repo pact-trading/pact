@@ -33,8 +33,8 @@ export class Permit2Facilitator {
     if (config.maxGas <= 0n || config.maxGas > 1_000_000n || config.maxAmount <= 0n || !config.merchants.length) fail('invalid_x402_policy');
     const pub = config.publicClient;
     const signer: FacilitatorEvmSigner = {
-      getAddresses: () => [config.journal.settlementCaller ?? config.journal.address],
-      readContract: args => pub.readContract({ ...args, account: config.journal.settlementCaller ?? config.journal.address } as never),
+      getAddresses: () => [config.journal.address],
+      readContract: args => pub.readContract({ ...args, account: config.journal.address } as never),
       verifyTypedData: args => pub.verifyTypedData(args as never),
       getCode: args => pub.getCode(args),
       waitForTransactionReceipt: async args => pub.waitForTransactionReceipt({ ...args, confirmations: 1, timeout: 60_000 }),
@@ -83,7 +83,7 @@ export class Permit2Facilitator {
     const auth = raw.permit2Authorization ?? fail('malformed_permit2_payload');
     if (!auth || !isAddress(auth.from) || !/^\d{1,78}$/.test(auth.nonce) || !/^\d{1,78}$/.test(auth.permitted?.amount) || !/^\d{1,78}$/.test(auth.deadline) || !/^0x[0-9a-fA-F]{130}$/.test(raw.signature ?? '')) fail('malformed_permit2_payload');
     if (BigInt(auth.permitted.amount) > this.config.maxAmount || BigInt(auth.deadline) > BigInt(Math.floor(Date.now() / 1000) + 300)) fail('authorization_cap');
-    if (req.scheme === 'upto' && norm(auth.witness.facilitator ?? '') !== norm(this.config.journal.settlementCaller ?? this.config.journal.address)) fail('wrong_facilitator');
+    if (req.scheme === 'upto' && norm(auth.witness.facilitator ?? '') !== norm(this.config.journal.address)) fail('wrong_facilitator');
     return { id: `${NETWORK}:permit2:${norm(auth.from)}:${BigInt(auth.nonce)}`, fingerprint: digest({ payload, req }), merchant: req.payTo as Address, payer: auth.from, amount: BigInt(req.amount) };
   }
   async verify(payload: PaymentPayload, req: PaymentRequirements) {

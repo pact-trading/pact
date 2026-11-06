@@ -1,5 +1,3 @@
-import { FundedOperations, type FundedConfiguration } from './funded-operations.js';
-import type { SettlementOperation } from './journal.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { SettleResponse } from '@x402/core/types';
 import { decodeEventLog, decodeFunctionData, encodeFunctionData, keccak256, parseAbi, toHex, type Address, type Hex } from 'viem';
@@ -11,6 +9,7 @@ import { canonicalJson, fingerprint, initX402Store } from './sqlite-store.js';
 import { bindSettlement, reservationDigest, reservationFingerprint, same, validateEnvelope } from './call-binding.js';
 import { X402WriteRefusal } from './write-ports.js';
 import type { MerchantSponsorshipPolicy, X402Receipt, X402Transaction, X402WritePorts } from './write-ports.js';
+import { gasCost } from '../approval-chain.js';
 
 export interface X402CoordinatorConfig {
   db: Db; writer: AccountWriter; ports: X402WritePorts; sponsorship: MerchantSponsorshipPolicy;
@@ -19,17 +18,14 @@ export interface X402CoordinatorConfig {
   /** Number of successor blocks, matching AccountWriter.reconcile (safe=head-depth). */
   confirmations: bigint;
   clock?: () => number;
-  funded?: FundedConfiguration;
 }
 export interface OperationIdentity {
   key: string; kind: 'x402' | 'x402_reservation'; payer: Address; nonce: string;
   merchant: Address; amount: bigint; fingerprint: Hex; permitDigest?: Hex;
-  variant?: 'funded'; routeFingerprint?: Hex;
 }
 interface OperationRow {
   operation_key: string; kind: OperationIdentity['kind']; payer: Address; permit_nonce: string;
   permit_digest: Hex | null; merchant: Address; amount: string; fingerprint: Hex; identity_json: string;
-  variant: 'direct' | 'funded';
   write_id: string; confirmations: string; state: string; request_json: string | null;
   request_hash: Hex | null; result_json: string | null; receipt_json: string | null;
 }
@@ -45,14 +41,12 @@ const settledTopic = keccak256(toHex('Settled()'));
 export class X402WriteCoordinator {
   private readonly context = new AsyncLocalStorage<{ key: string; active: boolean; writes: Promise<Hex>[] }>();
   private readonly time: () => number;
-  readonly funded: FundedOperations;
   constructor(readonly config: X402CoordinatorConfig) {
     if (config.writer.chainId !== 1874 || config.confirmations < 1n || config.maxSpendPerMinuteWei <= 0n || !config.sponsorship?.authorize) throw new Error('invalid_x402_writer_config');
     if (config.ports.writer && config.ports.writer !== config.writer) throw new Error('x402_shared_writer_required');
     config.writer.bind(config.db);
     initX402Store(config.db);
     this.time = config.clock ?? Date.now;
-    this.funded = new FundedOperations(config.db, config.funded, this.time);
   }
   get address() { return this.config.writer.relayer; }
   private row(key: string) { return this.config.db.prepare('SELECT * FROM x402_operations WHERE operation_key=?').get(key) as OperationRow | undefined; }
@@ -67,7 +61,7 @@ export class X402WriteCoordinator {
         return;
       }
       db.prepare(`INSERT INTO x402_operations(operation_key,kind,chain_id,payer,permit_nonce,permit_digest,merchant,amount,fingerprint,identity_json,write_id,confirmations,created_at,updated_at,variant)
-        VALUES (?,?,1874,?,?,?,?,?,?,?,?,?,?,?,?)`).run(identity.key, identity.kind, normalized.payer, identity.nonce, identity.permitDigest ?? null, normalized.merchant, identity.amount.toString(), normalized.fingerprint, identityJson, `x402-write:${fingerprint(identity.key)}`, this.config.confirmations.toString(), this.time(), this.time(), identity.variant ?? 'direct');
+        VALUES (?,?,1874,?,?,?,?,?,?,?,?,?,?,?,?)`).run(identity.key, identity.kind, normalized.payer, identity.nonce, identity.permitDigest ?? null, normalized.merchant, identity.amount.toString(), normalized.fingerprint, identityJson, `x402-write:${fingerprint(identity.key)}`, this.config.confirmations.toString(), this.time(), this.time(), 'direct');
     })();
     return identity.key;
   }
@@ -82,7 +76,7 @@ export class X402WriteCoordinator {
   }
   result(key: string): SettleResponse {
     const row = this.row(key); if (!row) throw new Error('unknown_x402_operation');
-    return row.result_json ? JSON.parse(row.result_json) as SettleResponse : this.response(row, false, row.state === 'reconciliation_required' ? 'reconciliation_required' : this.funded.held(key) ? 'merchant_authorization_pending' : 'settlement_pending');
+    return row.result_json ? JSON.parse(row.result_json) as SettleResponse : this.response(row, false, row.state === 'reconciliation_required' ? 'reconciliation_required' : 'settlement_pending');
   }
   async run(key: string, work: () => Promise<SettleResponse | void>): Promise<SettleResponse> {
     await this.reconcile(key);
@@ -93,7 +87,7 @@ export class X402WriteCoordinator {
         // A concurrent identical request may have completed while this one waited in the writer queue.
         await this.reconcile(key);
         row = this.row(key)!;
-        if (row.result_json || this.config.writer.record(row.write_id)?.tx_hash || this.funded.held(key)) return this.result(key);
+        if (row.result_json || this.config.writer.record(row.write_id)?.tx_hash) return this.result(key);
         let httpResult: SettleResponse | void;
         let failure: string | undefined;
         const scope = { key, active: true, writes: [] as Promise<Hex>[] };
@@ -106,7 +100,7 @@ export class X402WriteCoordinator {
           .run(canonicalJson(httpResult! ?? { error: failure ?? 'no_http_result' }), this.time(), key);
         await this.reconcile(key);
         row = this.row(key)!;
-        if (!row.result_json && !this.config.writer.record(row.write_id) && !this.funded.held(key)) this.finish(row, false, httpResult! && !httpResult.success ? httpResult.errorReason ?? 'verification_failed' : failure ?? 'no_journaled_submission');
+        if (!row.result_json && !this.config.writer.record(row.write_id)) this.finish(row, false, httpResult! && !httpResult.success ? httpResult.errorReason ?? 'verification_failed' : failure ?? 'no_journaled_submission');
         return this.result(key);
       }, row.write_id);
     } catch (error) {
@@ -125,23 +119,11 @@ export class X402WriteCoordinator {
     void write.catch(() => undefined);
     return write;
   }
-  sendFunded(key: string, operation: SettlementOperation, proxy: X402Transaction): Promise<Hex> {
-    const scope = this.context.getStore();
-    if (!scope?.active || scope.key !== key || this.row(key)?.variant !== 'funded') return Promise.reject(new Error('x402_funded_submit_outside_writer'));
-    const work = (async () => {
-      const binding = await this.funded.authorize(key, Object.freeze({ ...operation }), Object.freeze({ ...proxy }));
-      return this.sendBound(key, Object.freeze({ ...binding.transaction }));
-    })();
-    scope.writes.push(work); void work.catch(() => undefined); return work;
-  }
   private async sendBound(key: string, transaction: X402Transaction): Promise<Hex> {
     validateEnvelope(transaction);
     const { db, writer, ports, sponsorship } = this.config;
     const row = this.row(key)!;
-    if (row.variant === 'funded') {
-      const binding = await this.funded.binding(key);
-      if (canonicalJson(binding.transaction) !== canonicalJson(transaction)) throw new Error('funded_envelope_conflict');
-    } else if (row.kind === 'x402') bindSettlement({ id: row.operation_key, fingerprint: row.fingerprint, payer: row.payer, merchant: row.merchant, amount: BigInt(row.amount) }, transaction, this.address);
+    if (row.kind === 'x402') bindSettlement({ id: row.operation_key, fingerprint: row.fingerprint, payer: row.payer, merchant: row.merchant, amount: BigInt(row.amount) }, transaction, this.address);
     else {
       const decoded = decodeFunctionData({ abi: agentAccountAbi, data: transaction.data });
       if (decoded.functionName !== 'reserve' || !same(transaction.to, row.payer)) throw new Error('reservation_call_mismatch');
@@ -160,10 +142,9 @@ export class X402WriteCoordinator {
     db.prepare('UPDATE x402_operations SET request_json=?,request_hash=?,updated_at=? WHERE operation_key=?')
       .run(requestJson, requestHash, this.time(), key);
     if (await ports.chainId() !== 1874) throw new Error('wrong_chain');
-    const approved = await sponsorship.authorize({ operationId: key, kind: row.kind, variant: row.variant, payer: row.payer, merchant: row.merchant, amount: BigInt(row.amount), transaction }).catch(() => { throw new X402WriteRefusal('sponsorship_not_authorized'); });
+    const approved = await sponsorship.authorize({ operationId: key, kind: row.kind, payer: row.payer, merchant: row.merchant, amount: BigInt(row.amount), transaction }).catch(() => { throw new X402WriteRefusal('sponsorship_not_authorized'); });
     const grant = Object.freeze({ ...approved });
     if (!grant.policyId || grant.maxFeePerGas <= 0n || grant.merchantDailyLimitWei <= 0n || !Number.isSafeInteger(grant.merchantDailyCalls) || grant.merchantDailyCalls <= 0) throw new Error('invalid_sponsorship_grant');
-    if (row.variant === 'funded') await this.funded.preflight(key, transaction, grant.maxFeePerGas, ports);
     const cost = transaction.gas * grant.maxFeePerGas, at = this.time(), day = Math.floor(at / 86_400_000);
     const operation: WriteOperation = { id: row.write_id, kind: row.kind, objectId: key };
     // All reservations commit before prepare can sign. Any budget rejection rolls back all three.
@@ -176,13 +157,11 @@ export class X402WriteCoordinator {
       });
       writer.reserveSpend(operation.id, cost, this.config.maxSpendPerMinuteWei, at);
       db.prepare('INSERT INTO x402_sponsorship_reservations VALUES (?,?,?,?,?)').run(operation.id, row.merchant, day, cost.toString(), canonicalJson(grant));
-      if (row.variant === 'funded') this.funded.bindEnvelope(key, transaction, grant.maxFeePerGas);
       db.prepare("UPDATE x402_operations SET state='pending',updated_at=? WHERE operation_key=?").run(at, key);
     })();
     return writer.execute(operation, () => ports.transactionCount(), nonce => ports.prepare({ ...transaction, maxFeePerGas: grant.maxFeePerGas }, nonce), raw => ports.broadcast(raw));
   }
   private async matches(row: OperationRow, receipt: X402Receipt): Promise<boolean> {
-    if (row.variant === 'funded') return this.funded.matches(row.operation_key, receipt, this.address);
     const request = row.request_json ? JSON.parse(row.request_json) as X402Transaction : undefined;
     if (!request) return false;
     let transfers = 0n, count = 0, proxyEvent = false, reserved = false;
@@ -212,12 +191,10 @@ export class X402WriteCoordinator {
         db.prepare('UPDATE x402_operations SET receipt_json=?,updated_at=? WHERE operation_key=?').run(canonicalJson(receipt), this.time(), row.operation_key);
         if (receipt.block > await ports.latestBlock() - BigInt(row.confirmations)) continue;
         const matches = receipt.status === 'success' && await this.matches(row, receipt);
-        const refusal = !matches && row.variant === 'funded' && receipt.status === 'success' ? await this.funded.failure(row.operation_key, receipt) : undefined;
         db.transaction(() => {
-          writer.resolve(write.tx_hash!, receipt.block, receipt.status);
+          writer.resolve(write.tx_hash!, receipt.block, receipt.status, gasCost(receipt).gasCostWei);
           if (receipt.status === 'reverted') this.finish(row, false, 'transaction_reverted');
           else if (matches) this.finish(row, true);
-          else if (refusal) this.finish(row, false, refusal);
           else db.prepare("UPDATE x402_operations SET state='reconciliation_required',updated_at=? WHERE operation_key=? AND state NOT IN ('succeeded','failed')").run(this.time(), row.operation_key);
         })();
       } catch { /* Read/DB errors preserve all hash, nonce and budget reservations. */ }

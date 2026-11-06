@@ -1,4 +1,7 @@
-import { encodeFunctionData, erc20Abi, getAddress, isAddress, parseSignature, stringToHex, type Address, type Hex } from 'viem';
+import { encodeFunctionData, getAddress, isAddress, keccak256, maxUint256, parseSignature, recoverTypedDataAddress, stringToHex, type Address, type Hex } from 'viem';
+import { intentTypedData } from '../typed-data.js';
+import { permitAbi } from '../approval-chain.js';
+import type { IntentRequest } from '../types.js';
 import { id, now as nowIso, type Db } from '../db.js';
 import { pendingPaymentIntent } from '../payment-state.js';
 import { invoiceDetail } from '../invoices-live.js';
@@ -14,15 +17,9 @@ import {
 type Row = Record<string, string | number | null>;
 type Audience = 'merchant' | 'investor';
 type FinancingStatus = 'eligible' | 'requested' | 'funded' | 'overdue' | 'defaulted' | 'repaid' | 'bought_back';
-/** Transactions the signer's wallet sends itself (the merchant: listing, cancelling, buying back). */
-export interface PreparedTransactions {
-  title: string;
-  lines: Array<{ label: string; value: string }>;
-  transactions: Array<{ to: Address; data: Hex; label: string }>;
-}
 /**
- * EIP-712 messages an investor or officer signs, in order (the order first, then any USDT permit), and
- * the order to send back with the signatures. Pact's relayer submits it and pays the gas.
+ * EIP-712 messages a merchant, investor or officer signs, in order, and the order to send back with
+ * the signatures. Pact's relayer submits it: nobody but Pact needs WBT.
  */
 export interface PreparedSignature {
   title: string;
@@ -34,7 +31,20 @@ export interface PreparedSignature {
 /** How long a signed order stays valid. */
 const ORDER_SECONDS = 10 * 60;
 /** Gas the relayer allows each signed order; the call is simulated first. */
-const RELAY_GAS = { purchase: 450_000n, transfer: 250_000n, decision: 150_000n, cancel: 100_000n } as const;
+const RELAY_GAS = { purchase: 450_000n, transfer: 250_000n, decision: 150_000n, cancel: 100_000n, list: 350_000n, cancelListing: 150_000n, withdraw: 120_000n, permit: 120_000n } as const;
+/** Gas a buy-back may use: it pays every holder in one call. The merchant pays it, in USDT. */
+const BUY_BACK_GAS = 900_000;
+/** The Router's gas overhead on top of a buy-back's signed gas, as the relayer prices it. */
+const ROUTER_OVERHEAD = 60_000n;
+const permitTypes = { Permit: [{ name: 'owner', type: 'address' }, { name: 'spender', type: 'address' }, { name: 'value', type: 'uint256' }, { name: 'nonce', type: 'uint256' }, { name: 'deadline', type: 'uint256' }] };
+
+/** How a merchant-signed Router intent (a buy-back) reaches Pact's relayer. Set by the API. */
+export interface FinancingIntents {
+  router: Address;
+  /** Gas price and WBT price, to bound what the buy-back's gas can cost the merchant in USDT. */
+  quote(maxGas: number): Promise<{ maximumGasFeeMinor: string }>;
+  submit(request: IntentRequest, merchantId: string): Promise<Hex>;
+}
 /** Signed orders Pact relays for one wallet in an hour, on top of the relayer's own spend limit. */
 const RELAYS_PER_HOUR = 20;
 /** The contracts' errors, in words. */
@@ -193,7 +203,8 @@ export class FinancingService {
       }
       if (!receipt) throw new Refusal('transaction_not_found');
       if (expectFrom && lower(receipt.from) !== lower(expectFrom)) throw new Refusal('transaction_sender_mismatch');
-      const allowed = [this.addresses.receivables, this.addresses.registry, USDT].map(lower);
+      // A buy-back goes through the Router: the merchant signs it and pays its gas.
+      const allowed = [this.addresses.receivables, this.addresses.registry, USDT, ...(this.intents ? [this.intents.router] : [])].map(lower);
       if (!receipt.to || !allowed.includes(lower(receipt.to))) throw new Refusal('transaction_target_mismatch');
       if (receipt.status !== 'success') throw new Refusal('transaction_reverted');
       events.push(...receipt.events);
@@ -537,7 +548,8 @@ export class FinancingService {
     return this.view(this.invoiceRow(invoiceId, merchantId), "merchant", null, await this.now());
   }
 
-  async prepareList(merchant: { merchantId: string; address: Address }, invoiceId: string): Promise<PreparedTransactions> {
+  /** The listing a merchant signs (EIP-712 `List`): Pact's relayer submits it, so listing needs no gas. */
+  async prepareList(merchant: { merchantId: string; address: Address }, invoiceId: string): Promise<PreparedSignature> {
     const t = await this.now();
     const row = this.invoiceRow(invoiceId, merchant.merchantId);
     const current = currentClaim(this.db, invoiceId);
@@ -556,7 +568,11 @@ export class FinancingService {
     this.db.prepare('INSERT INTO fin_refs VALUES (?,?,?) ON CONFLICT(invoice_ref) DO NOTHING').run(ref.toLowerCase(), invoiceId, merchant.merchantId);
     this.db.prepare('INSERT INTO fin_quotes VALUES (?,?,?,?,?,?) ON CONFLICT(invoice_ref,discount_bps) DO UPDATE SET day_rate_bps=excluded.day_rate_bps,days=excluded.days,late_premium_bps=excluded.late_premium_bps,created_at=excluded.created_at')
       .run(ref.toLowerCase(), price.discountBps, price.dayRateBps, price.days, price.latePremiumBps, nowIso());
-    const maturity = BigInt(this.dueOf(row)!);
+    const maturity = this.dueOf(row)!;
+    const deadline = t + ORDER_SECONDS;
+    const nonce = await this.chain.nonce('receivables', merchant.address);
+    // The contract checks the customer's acknowledgement itself: this invoice, amount, due date and merchant.
+    const order = { invoiceId, debtor: lower(ack.signer), face: face.toString(), maturity: String(maturity), discountBps: String(price.discountBps), deadline: String(deadline) };
     return {
       title: `List ${this.number(row)} for investors`,
       lines: [
@@ -565,45 +581,177 @@ export class FinancingService {
         { label: 'You receive at once', value: `${usd(quoted.upfront)} if all of it sells` },
         { label: 'Then', value: `${usd(quoted.reserve)} reserve when ${this.debtorName(row)} pays` },
         { label: 'Customer pays', value: 'The contract, which pays the investors' },
+        { label: 'Gas', value: 'Paid by Pact: you only sign' },
       ],
-      // The contract checks the customer's acknowledgement itself: this invoice, amount, due date and merchant.
-      transactions: [{ to: this.addresses.receivables, label: 'List the invoice', data: encodeFunctionData({ abi: receivablesAbi, functionName: 'list', args: [invoiceId, getAddress(ack.signer), face, maturity, price.discountBps, ack.signature] }) }],
+      typedData: [{
+        domain: this.receivablesDomain(), primaryType: 'List',
+        types: { List: [{ name: 'merchant', type: 'address' }, { name: 'invoiceId', type: 'string' }, { name: 'debtor', type: 'address' }, { name: 'face', type: 'uint256' }, { name: 'maturity', type: 'uint64' }, { name: 'discountBps', type: 'uint16' }, { name: 'acknowledgement', type: 'bytes' }, { name: 'nonce', type: 'uint256' }, { name: 'deadline', type: 'uint256' }] },
+        message: { merchant: lower(merchant.address), invoiceId, debtor: order.debtor, face: order.face, maturity: order.maturity, discountBps: order.discountBps, acknowledgement: ack.signature, nonce: nonce.toString(), deadline: order.deadline },
+      }],
+      order,
     };
   }
 
-  async prepareCancel(merchant: { merchantId: string; address: Address }, invoiceId: string): Promise<PreparedTransactions> {
+  /** Submits the merchant's signed listing from Pact's relayer. */
+  async relayList(merchant: { merchantId: string; address: Address }, invoiceId: string, body: Record<string, unknown>) {
+    this.invoiceRow(invoiceId, merchant.merchantId);
+    const order = this.orderOf(body, ['face', 'maturity', 'discountBps', 'deadline']);
+    const [signature] = this.signaturesOf(body, 1);
+    if (order.invoiceId !== invoiceId || typeof order.debtor !== 'string' || !isAddress(order.debtor)) throw new Refusal('order_mismatch', 'This listing is for another invoice.');
+    const ack = this.db.prepare('SELECT signature FROM invoice_acknowledgements WHERE invoice_id=?').get(invoiceId) as { signature: Hex } | undefined;
+    if (!ack) throw new Refusal('not_eligible', 'The customer has not acknowledged this invoice.');
+    const data = encodeFunctionData({ abi: receivablesAbi, functionName: 'listWithSig', args: [{ merchant: getAddress(merchant.address), invoiceId, debtor: getAddress(order.debtor), face: BigInt(order.face), maturity: BigInt(order.maturity), discountBps: Number(order.discountBps), deadline: BigInt(order.deadline) }, ack.signature, signature] });
+    const spend = await this.absorb?.(merchant.merchantId, RELAY_GAS.list);
+    const hash = await this.relayed(merchant.address, 'receivables', data, RELAY_GAS.list, () => undefined);
+    spend?.(hash, 'financing_list');
+    return this.invoice(merchant.merchantId, invoiceId);
+  }
+
+  /** Taking a listing down, signed by the merchant (EIP-712 `CancelListing`). */
+  async prepareCancel(merchant: { merchantId: string; address: Address }, invoiceId: string): Promise<PreparedSignature> {
     const t = await this.now();
     const row = this.invoiceRow(invoiceId, merchant.merchantId);
     const c = currentClaim(this.db, invoiceId);
     if (!c) throw new Refusal('not_requested', 'There is no financing request to cancel.');
     if (c.status !== 'listed' || this.statusOf(c, t) !== 'requested') throw new Refusal('already_funded', 'The listing is already closed, so it can no longer be cancelled.');
     const sold = big(c.sold);
+    const deadline = t + ORDER_SECONDS;
+    const nonce = await this.chain.nonce('receivables', merchant.address);
+    const order = { claimId: c.id, deadline: String(deadline) };
     return {
       title: sold > 0n ? `Close the listing for ${this.number(row)}` : `Cancel financing for ${this.number(row)}`,
       lines: sold > 0n
         ? [{ label: 'Investors keep', value: usd(sold) }, { label: 'You keep', value: usd(big(c.face) - sold) }]
         : [{ label: 'Effect', value: 'Taken off the marketplace. No money has moved.' }],
-      transactions: [{ to: this.addresses.receivables, label: sold > 0n ? 'Close the listing' : 'Cancel the listing', data: encodeFunctionData({ abi: receivablesAbi, functionName: 'cancel', args: [BigInt(c.id)] }) }],
+      typedData: [{
+        domain: this.receivablesDomain(), primaryType: 'CancelListing',
+        types: { CancelListing: [{ name: 'merchant', type: 'address' }, { name: 'claimId', type: 'uint256' }, { name: 'nonce', type: 'uint256' }, { name: 'deadline', type: 'uint256' }] },
+        message: { merchant: lower(merchant.address), claimId: c.id, nonce: nonce.toString(), deadline: order.deadline },
+      }],
+      order,
     };
   }
 
-  async prepareBuyBack(merchant: { merchantId: string; address: Address }, invoiceId: string): Promise<PreparedTransactions> {
+  async relayCancel(merchant: { merchantId: string; address: Address }, invoiceId: string, body: Record<string, unknown>) {
+    this.invoiceRow(invoiceId, merchant.merchantId);
+    const c = currentClaim(this.db, invoiceId);
+    const order = this.orderOf(body, ['claimId', 'deadline']);
+    const [signature] = this.signaturesOf(body, 1);
+    if (!c || order.claimId !== c.id) throw new Refusal('order_mismatch', 'This cancellation is for another listing.');
+    const data = encodeFunctionData({ abi: receivablesAbi, functionName: 'cancelWithSig', args: [getAddress(merchant.address), BigInt(c.id), BigInt(order.deadline), signature] });
+    const spend = await this.absorb?.(merchant.merchantId, RELAY_GAS.cancelListing);
+    const hash = await this.relayed(merchant.address, 'receivables', data, RELAY_GAS.cancelListing, () => undefined);
+    spend?.(hash, 'financing_cancel');
+    return this.invoice(merchant.merchantId, invoiceId);
+  }
+
+  /** Attaches the Router path a buy-back takes. Without it, buy-backs are unavailable. */
+  attachIntents(intents: FinancingIntents) { this.intents = intents; }
+  private intents?: FinancingIntents;
+  /**
+   * Charges a merchant's own relayed orders (listing, cancelling a listing) to its daily sponsorship
+   * budget: refuses past it, and returns how to record the spend once the order is sent.
+   */
+  attachSponsorship(absorb: (merchantId: string, gas: bigint) => Promise<(operationId: string, kind: string) => void>) { this.absorb = absorb; }
+  private absorb?: (merchantId: string, gas: bigint) => Promise<(operationId: string, kind: string) => void>;
+
+  /**
+   * A buy-back moves the merchant's money, so the merchant signs it as a Router intent and pays its
+   * gas in USDT on top, like a refund. Any USDT permit it still needs comes first: the receivables
+   * contract takes what the holders are owed, the Router takes the gas.
+   */
+  async prepareBuyBack(merchant: { merchantId: string; address: Address }, invoiceId: string): Promise<PreparedSignature> {
+    if (!this.intents) throw new Refusal('buy_back_unavailable', 'Buy-backs are not connected on this network.');
+    const t = await this.now();
     const row = this.invoiceRow(invoiceId, merchant.merchantId);
     const c = currentClaim(this.db, invoiceId);
     if (!c || c.status !== 'defaulted') throw new Refusal('not_defaulted', 'Only a defaulted invoice can be bought back.');
     const owed = await this.chain.owed(BigInt(c.id));
+    const gasCeiling = BigInt((await this.intents.quote(BUY_BACK_GAS)).maximumGasFeeMinor);
     const balance = await this.chain.usdtBalance(merchant.address);
-    if (balance < owed) throw new Refusal('insufficient_funds', `Your wallet holds ${usd(balance)}; the buy-back is ${usd(owed)}.`);
-    const allowance = await this.chain.allowance(merchant.address, this.addresses.receivables);
+    if (balance < owed + gasCeiling) throw new Refusal('insufficient_funds', `Your wallet holds ${usd(balance)}; the buy-back is ${usd(owed)} plus up to ${usd(gasCeiling)} network fee.`);
     const holders = holdingRows(this.db, c.id).map(h => this.holderLabel(h.holder).organization);
+    const deadline = t + ORDER_SECONDS;
+    const typedData: Array<Record<string, unknown>> = [];
+    const permit = await this.chain.permit(merchant.address);
+    let permitNonce = permit.nonce;
+    const permits: string[] = [];
+    // Permits are signed in nonce order and submitted one after the other.
+    for (const [spender, needed] of [['receivables', owed], ['router', gasCeiling]] as const) {
+      const address = spender === 'receivables' ? this.addresses.receivables : this.intents.router;
+      if (await this.chain.allowance(merchant.address, address) >= needed) continue;
+      typedData.push({ domain: permit.domain, primaryType: 'Permit', types: permitTypes, message: { owner: lower(merchant.address), spender: lower(address), value: maxUint256.toString(), nonce: permitNonce.toString(), deadline: String(deadline) } });
+      permits.push(spender);
+      permitNonce++;
+    }
+    const data = encodeFunctionData({ abi: receivablesAbi, functionName: 'buyBack', args: [BigInt(c.id)] });
+    const nonce = BigInt(stringToHex(`${c.id}:${deadline}`, { size: 32 }));
+    const intent = { signer: getAddress(merchant.address), merchant: getAddress(merchant.address), target: this.addresses.receivables, dataHash: keccak256(data), amount: owed, nonce, deadline: BigInt(deadline), maxGas: BUY_BACK_GAS };
+    typedData.push(JSON.parse(JSON.stringify(intentTypedData(intent, this.intents.router), (_, v) => typeof v === 'bigint' ? v.toString() : v)));
     return {
       title: `Buy back ${this.number(row)}`,
-      lines: [{ label: 'You pay', value: usd(owed) }, { label: 'To', value: names(holders) }, { label: 'Then', value: `${this.debtorName(row)}’s payment comes to you` }],
-      transactions: [
-        ...(allowance < owed ? [{ to: USDT, label: `Allow the contract to take ${usd(owed)}`, data: encodeFunctionData({ abi: erc20Abi, functionName: 'approve', args: [this.addresses.receivables, owed] }) }] : []),
-        { to: this.addresses.receivables, label: 'Pay the holders', data: encodeFunctionData({ abi: receivablesAbi, functionName: 'buyBack', args: [BigInt(c.id)] }) },
+      lines: [
+        { label: 'You pay', value: usd(owed) },
+        { label: 'Network fee', value: `Up to ${usd(gasCeiling)}, in USDT` },
+        { label: 'To', value: names(holders) },
+        { label: 'Then', value: `${this.debtorName(row)}’s payment comes to you` },
       ],
+      typedData,
+      order: { claimId: c.id, owed: owed.toString(), nonce: nonce.toString(), deadline: String(deadline), maxGas: String(BUY_BACK_GAS), permits: permits.join(',') },
     };
+  }
+
+  async relayBuyBack(merchant: { merchantId: string; address: Address }, invoiceId: string, body: Record<string, unknown>) {
+    if (!this.intents) throw new Refusal('buy_back_unavailable', 'Buy-backs are not connected on this network.');
+    this.invoiceRow(invoiceId, merchant.merchantId);
+    const c = currentClaim(this.db, invoiceId);
+    const order = this.orderOf(body, ['claimId', 'owed', 'nonce', 'deadline', 'maxGas']);
+    const permits = typeof order.permits === 'string' && order.permits ? order.permits.split(',') : [];
+    if (permits.some(p => p !== 'receivables' && p !== 'router')) throw new Refusal('invalid_order', 'The signed order is malformed.');
+    const signatures = this.signaturesOf(body, permits.length + 1);
+    if (!c || order.claimId !== c.id || c.status !== 'defaulted') throw new Refusal('order_mismatch', 'This buy-back is for another listing.');
+    const deadline = BigInt(order.deadline);
+    const data = encodeFunctionData({ abi: receivablesAbi, functionName: 'buyBack', args: [BigInt(c.id)] });
+    const request: IntentRequest = {
+      intent: { signer: getAddress(merchant.address), merchant: getAddress(merchant.address), target: this.addresses.receivables, dataHash: keccak256(data), amount: BigInt(order.owed), nonce: BigInt(order.nonce), deadline, maxGas: Number(order.maxGas) },
+      data, signature: signatures[permits.length],
+    };
+    // Check the buy-back's own signature before relaying any permit, so a bad order costs no gas.
+    const signer = await recoverTypedDataAddress({ ...intentTypedData(request.intent, this.intents.router), signature: request.signature }).catch(() => null);
+    if (!signer || lower(signer) !== lower(merchant.address)) throw new Refusal('invalid_signature', 'The signature does not match this buy-back. Prepare it again.');
+    for (const [index, spender] of permits.entries()) {
+      const { v, r, s } = splitSignature(signatures[index]);
+      const to = spender === 'receivables' ? this.addresses.receivables : this.intents.router;
+      const permit = encodeFunctionData({ abi: permitAbi, functionName: 'permit', args: [getAddress(merchant.address), to, maxUint256, deadline, Number(v), r, s] });
+      await this.relayed(merchant.address, 'usdt', permit, RELAY_GAS.permit, () => undefined);
+    }
+    const hash = await this.intents.submit(request, merchant.merchantId);
+    await this.settle([hash]);
+    return this.invoice(merchant.merchantId, invoiceId);
+  }
+
+  /**
+   * USDT the contract could not deliver (a token that refused the transfer) waits as a credit. Its
+   * owner, merchant or investor, withdraws it with a signature (EIP-712 `Withdraw`).
+   */
+  async prepareWithdraw(address: Address): Promise<PreparedSignature> {
+    const credit = await this.chain.claimable(address);
+    if (credit === 0n) throw new Refusal('nothing_to_withdraw', 'There is nothing waiting for this wallet.');
+    const deadline = (await this.now()) + ORDER_SECONDS;
+    const nonce = await this.chain.nonce('receivables', address);
+    return {
+      title: `Withdraw ${usd(credit)}`,
+      lines: [{ label: 'Amount', value: usd(credit) }, { label: 'Gas', value: 'Paid by Pact: you only sign' }],
+      typedData: [{ domain: this.receivablesDomain(), primaryType: 'Withdraw', types: { Withdraw: [{ name: 'account', type: 'address' }, { name: 'nonce', type: 'uint256' }, { name: 'deadline', type: 'uint256' }] }, message: { account: lower(address), nonce: nonce.toString(), deadline: String(deadline) } }],
+      order: { account: lower(address), amount: credit.toString(), deadline: String(deadline) },
+    };
+  }
+  async relayWithdraw(address: Address, body: Record<string, unknown>) {
+    const order = this.orderOf(body, ['deadline']);
+    const [signature] = this.signaturesOf(body, 1);
+    const data = encodeFunctionData({ abi: receivablesAbi, functionName: 'withdrawWithSig', args: [getAddress(address), BigInt(order.deadline), signature] });
+    await this.relayed(address, 'receivables', data, RELAY_GAS.withdraw, () => undefined);
+    return { address: lower(address), claimableMinor: (await this.chain.claimable(address)).toString() };
   }
 
   // ------------------------------------------------------------ investors
@@ -846,7 +994,7 @@ export class FinancingService {
    * A contract refusal found by the simulation is mapped by `refusal` (which may record it) or
    * reported plainly; nothing is sent and no gas is spent.
    */
-  private async relayed(address: Address, contract: 'receivables' | 'registry', data: Hex, gas: bigint, refusal: (name: string) => void) {
+  private async relayed(address: Address, contract: 'receivables' | 'registry' | 'usdt', data: Hex, gas: bigint, refusal: (name: string) => void) {
     const since = new Date(Date.now() - 3_600_000).toISOString();
     const used = (this.db.prepare('SELECT count(*) n FROM fin_relays WHERE address=? AND at>?').get(lower(address), since) as { n: number }).n;
     if (used >= RELAYS_PER_HOUR) throw new Refusal('relay_limit', `Pact relays up to ${RELAYS_PER_HOUR} signed orders an hour for each wallet. Try again later.`);

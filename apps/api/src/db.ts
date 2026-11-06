@@ -34,7 +34,6 @@ export function openDb(path: string | Buffer = ':memory:'): Db {
     CREATE TABLE IF NOT EXISTS webhook_events(id TEXT PRIMARY KEY, merchant_id TEXT NOT NULL, type TEXT NOT NULL, object_id TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS webhook_deliveries(id TEXT PRIMARY KEY, event_id TEXT NOT NULL, merchant_id TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending', next_at TEXT NOT NULL, last_http_status INTEGER, last_error TEXT, delivered_at TEXT, UNIQUE(event_id,merchant_id));
     CREATE TABLE IF NOT EXISTS webhook_attempts(id TEXT PRIMARY KEY, delivery_id TEXT NOT NULL, attempt INTEGER NOT NULL, http_status INTEGER, error TEXT, attempted_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS gas_ledger(id TEXT PRIMARY KEY, merchant_id TEXT NOT NULL, tx_hash TEXT NOT NULL, cost_wei TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS reminders(invoice_id TEXT NOT NULL, stage TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(invoice_id,stage));
     CREATE TABLE IF NOT EXISTS refusal_attempts(id TEXT PRIMARY KEY, merchant_id TEXT NOT NULL, object_id TEXT NOT NULL, reason TEXT NOT NULL, tx_hash TEXT, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS approval_attempts(
@@ -60,13 +59,15 @@ export function openDb(path: string | Buffer = ':memory:'): Db {
   if (!(db.pragma('table_info(plans)') as Array<{ name: string }>).some(x => x.name === 'trial_days')) db.exec('ALTER TABLE plans ADD COLUMN trial_days INTEGER NOT NULL DEFAULT 0');
   for (const column of ['cancelled_at', 'cancelled_by', 'trial_ends_at', 'trial_customer_subject_id']) if (!(db.pragma('table_info(subscriptions)') as Array<{ name: string }>).some(x => x.name === column)) db.exec(`ALTER TABLE subscriptions ADD COLUMN ${column} TEXT`);
   if (!(db.pragma('table_info(payments)') as Array<{ name: string }>).some(x => x.name === 'payer')) db.exec('ALTER TABLE payments ADD COLUMN payer TEXT');
-  if (!(db.pragma('table_info(gas_ledger)') as Array<{ name: string }>).some(x => x.name === 'fee_usdt')) db.exec("ALTER TABLE gas_ledger ADD COLUMN fee_usdt TEXT NOT NULL DEFAULT '0'");
+  // What each confirmed relayer write actually cost Pact in gas: Pact's margin is its fees less this.
+  if (!(db.pragma('table_info(relayer_operations)') as Array<{ name: string }>).some(x => x.name === 'gas_cost_wei')) db.exec('ALTER TABLE relayer_operations ADD COLUMN gas_cost_wei TEXT');
   // A label for each API key, and the merchant's display preferences (live mode).
   if (!(db.pragma('table_info(api_keys)') as Array<{ name: string }>).some(x => x.name === 'name')) db.exec("ALTER TABLE api_keys ADD COLUMN name TEXT NOT NULL DEFAULT ''");
-  db.exec("CREATE TABLE IF NOT EXISTS merchant_preferences(merchant_id TEXT PRIMARY KEY, brand_color TEXT NOT NULL, fee_mode TEXT NOT NULL, updated_at TEXT NOT NULL)");
-  // What a sponsored transaction was for, so the gas ledger can label each row.
-  for (const column of ['action', 'object_id']) if (!(db.pragma('table_info(gas_ledger)') as Array<{ name: string }>).some(x => x.name === column)) db.exec(`ALTER TABLE gas_ledger ADD COLUMN ${column} TEXT`);
-  db.exec('CREATE TABLE IF NOT EXISTS merchant_gas_policy(merchant_id TEXT PRIMARY KEY, mode TEXT NOT NULL, surcharge_minor TEXT NOT NULL, low_runway_alert_days INTEGER NOT NULL, updated_at TEXT NOT NULL)');
+  db.exec("CREATE TABLE IF NOT EXISTS merchant_preferences(merchant_id TEXT PRIMARY KEY, brand_color TEXT NOT NULL, updated_at TEXT NOT NULL)");
+  // Customers never pay Pact's fee, so the old "who pays the fee" preference is gone.
+  if ((db.pragma('table_info(merchant_preferences)') as Array<{ name: string }>).some(x => x.name === 'fee_mode')) db.exec('ALTER TABLE merchant_preferences DROP COLUMN fee_mode');
+  // Gas Pact's relayer absorbed for a merchant (subscribing, cancelling, permits, signed orders), per UTC day.
+  db.exec('CREATE TABLE IF NOT EXISTS sponsored_spend(operation_id TEXT PRIMARY KEY, merchant_id TEXT NOT NULL, day TEXT NOT NULL, cost_wei TEXT NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS sponsored_spend_day ON sponsored_spend(merchant_id,day);');
   // Where a refusal happened (relayer, contract, api) and who signed the refused request.
   for (const column of ['source', 'signer']) if (!(db.pragma('table_info(refusal_attempts)') as Array<{ name: string }>).some(x => x.name === column)) db.exec(`ALTER TABLE refusal_attempts ADD COLUMN ${column} TEXT`);
   initAccounting(db);

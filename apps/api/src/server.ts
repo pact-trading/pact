@@ -16,10 +16,11 @@ import { Relayer, allowedTargets } from './relayer.js';
 import { createApp } from './app.js';
 import { Indexer } from './indexer.js';
 import { runKeeper } from './keeper.js';
-import { renewalService } from './renewal-service.js';
+import { KeeperRenewals } from './subscriptions-live.js';
+import { SponsorshipBudget, sponsorshipLimits } from './sponsorship.js';
+import { Treasury, treasuryConfig } from './treasury.js';
 import { deliverWebhooks } from './webhooks.js';
 import { deliverNotifications, mailSender } from './notifications.js';
-import { checkGasRunways } from './gas-alerts.js';
 import { deliverTelegram, pollTelegram, telegramClient, telegramConfig } from './telegram.js';
 import type { Address, Hex } from 'viem';
 
@@ -27,7 +28,7 @@ const addresses: Addresses = {
   router: process.env.ROUTER_ADDRESS as Address,
   escrow: process.env.ESCROW_ADDRESS as Address,
   subscription: process.env.SUBSCRIPTION_ADDRESS as Address,
-  gasTank: process.env.GAS_TANK_ADDRESS as Address,
+  fees: process.env.FEE_SCHEDULE_ADDRESS as Address,
 };
 // Invoice financing is optional: the receivables contract and investor registry deployed beside the suite.
 const financingAddresses = process.env.RECEIVABLES_ADDRESS && process.env.INVESTOR_REGISTRY_ADDRESS
@@ -35,12 +36,9 @@ const financingAddresses = process.env.RECEIVABLES_ADDRESS && process.env.INVEST
   : undefined;
 if (financingAddresses) addresses.receivables = financingAddresses.receivables;
 const live = process.env.CHAIN_ADAPTER === 'viem';
-if (live && (!process.env.RPC_URL || !process.env.RELAYER_PRIVATE_KEY || Object.values(addresses).some(x => !x))) throw new Error('Viem adapter requires RPC_URL, RELAYER_PRIVATE_KEY and all four contract addresses');
-const subscriptionVersion = process.env.SUBSCRIPTION_VERSION ?? '1';
-if (!['1', '2'].includes(subscriptionVersion)) throw new Error('SUBSCRIPTION_VERSION must be 1 or 2');
-const version = Number(subscriptionVersion) as 1 | 2;
+if (live && (!process.env.RPC_URL || !process.env.RELAYER_PRIVATE_KEY || Object.values(addresses).some(x => !x))) throw new Error('Viem adapter requires RPC_URL, RELAYER_PRIVATE_KEY and ROUTER_ADDRESS, ESCROW_ADDRESS, SUBSCRIPTION_ADDRESS, FEE_SCHEDULE_ADDRESS');
 const privyConfig = identityConfig(process.env);
-const chain = live ? new ViemChain(process.env.RPC_URL!, process.env.RELAYER_PRIVATE_KEY as Hex, addresses, version) : new FakeChain(true, version);
+const chain = live ? new ViemChain(process.env.RPC_URL!, process.env.RELAYER_PRIVATE_KEY as Hex, addresses) : new FakeChain(true);
 // Constructing the adapter performs no network writes. Acquire by its actual
 // signing identity before opening/migrating the runtime DB, binding the writer,
 // exposing HTTP, or starting any background job (including crash recovery).
@@ -50,11 +48,13 @@ await startOwnedRelayer({ chainId: chain.writer.chainId, relayer: chain.writer.r
     const keys = seedMerchant(db, process.env.BOOTSTRAP_MERCHANT_ADDRESS);
     console.info('Bootstrap keys (shown once):', keys);
   }
-  const relayer = new Relayer(chain, addresses.router ?? '0x0000000000000000000000000000000000000001', allowedTargets(addresses.escrow ?? '0x0000000000000000000000000000000000000002', addresses.subscription ?? '0x0000000000000000000000000000000000000003', version, live ? financingAddresses?.receivables : undefined), { minAmount: BigInt(process.env.RELAYER_MIN_AMOUNT_MINOR ?? '1000000'), maxGas: 1_000_000n, maxGasPrice: 100_000_000_000n,
+  const relayer = new Relayer(chain, addresses.router ?? '0x0000000000000000000000000000000000000001', allowedTargets({ escrow: addresses.escrow ?? '0x0000000000000000000000000000000000000002', subscription: addresses.subscription ?? '0x0000000000000000000000000000000000000003', receivables: live ? financingAddresses?.receivables : undefined }), { minAmount: BigInt(process.env.RELAYER_MIN_AMOUNT_MINOR ?? '1000000'), maxGas: 1_000_000n, maxGasPrice: 100_000_000_000n,
     // Global ceiling for the one relayer, and a lower one per merchant so testers do not block each other.
     maxSpendPerMinute: BigInt(process.env.RELAYER_MAX_SPEND_PER_MINUTE_WEI ?? '10000000000000000'),
     maxSpendPerMerchantPerMinute: BigInt(process.env.RELAYER_MAX_SPEND_PER_MERCHANT_PER_MINUTE_WEI ?? process.env.RELAYER_MAX_SPEND_PER_MINUTE_WEI ?? '10000000000000000') });
   const approval = new ApprovalService(db, chain, approvalConfig(process.env, addresses.escrow ?? '0x0000000000000000000000000000000000000002', relayer.minimumAmount));
+  // The gas Pact absorbs on calls that move no money to a merchant, per merchant per day.
+  const sponsorship = new SponsorshipBudget(db, sponsorshipLimits(process.env));
   // Merchants sign in with a wallet (EIP-4361); customers with Privy email or, on a local fork, a test wallet.
   const verifier = live ? createPublicClient({ transport: rpcTransport(process.env.RPC_URL!, { retryCount: 0, timeout: 10_000 }) }) : undefined;
   const wallet = new WalletIdentity(db, {
@@ -64,7 +64,7 @@ await startOwnedRelayer({ chainId: chain.writer.chainId, relayer: chain.writer.r
   });
   const identity = new Identities(privyConfig ? new PrivyIdentity(db, privyConfig) : undefined, wallet);
   const faucet = live && process.env.PACT_LOCAL_FORK === '1' ? new LocalFaucet(process.env.RPC_URL!) : undefined;
-  // Live mode on SubscriptionManager V1: the keeper key pulls renewals itself (the contract allows it).
+  // The keeper key pulls renewals itself (the contract allows it); each renewal's fee covers its gas.
   // x402 in live mode: our facilitator, each merchant's paid API, and customer-owned agent accounts.
   let x402Live: LiveX402 | undefined, agents: AgentService | undefined;
   if (live && process.env.X402_FACTORY_ADDRESS && process.env.X402_RUNTIME_HASHES) {
@@ -74,7 +74,9 @@ await startOwnedRelayer({ chainId: chain.writer.chainId, relayer: chain.writer.r
     });
     agents = new AgentService(db, chain as ViemChain, pub as never, process.env.X402_FACTORY_ADDRESS as Address, x402Live, `http://127.0.0.1:${process.env.PORT ?? 3001}`);
   }
-  const renewals = renewalService(db, chain);
+  const renewals = new KeeperRenewals(db, chain);
+  // Live mode: keep the FeeSchedule's WBT price near the pool's and the relayer in gas from its fees.
+  const treasury = live && process.env.TREASURY_ENABLED !== 'false' ? new Treasury(chain as ViemChain, process.env.RPC_URL!, addresses.fees, treasuryConfig(process.env)) : undefined;
   const telegram = telegramConfig();
   const confirmations = BigInt(process.env.CONFIRMATIONS ?? '2');
   const financing = live && financingAddresses
@@ -84,7 +86,7 @@ await startOwnedRelayer({ chainId: chain.writer.chainId, relayer: chain.writer.r
     })
     : undefined;
   const registryOwner = faucet && process.env.INVESTOR_REGISTRY_OWNER ? process.env.INVESTOR_REGISTRY_OWNER as Address : undefined;
-  const app = createApp({ telegram, renewals, identity, wallet, faucet, agents, x402Live, db, chain, relayer, approval, financing, registryOwner, baseUrl: process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000', router: addresses.router, escrow: addresses.escrow, subscription: addresses.subscription });
+  const app = createApp({ telegram, renewals, identity, wallet, faucet, agents, x402Live, db, chain, relayer, approval, sponsorship, financing, registryOwner, baseUrl: process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000', router: addresses.router, escrow: addresses.escrow, subscription: addresses.subscription, fees: addresses.fees });
   const http = serve({ fetch: app.fetch, port: Number(process.env.PORT ?? 3001), hostname: process.env.HOST });
   console.info(`Settle API listening on ${process.env.PORT ?? 3001}`);
   const indexer = new Indexer(db, chain, BigInt(process.env.DEPLOYMENT_BLOCK ?? '0'), confirmations);
@@ -96,7 +98,7 @@ await startOwnedRelayer({ chainId: chain.writer.chainId, relayer: chain.writer.r
     { name: 'keeper', intervalMs: 15_000, run: () => runKeeper(db, chain, new Date(), renewals) },
     { name: 'webhooks', intervalMs: 1000, run: () => deliverWebhooks(db) },
     { name: 'notifications', intervalMs: 5000, run: () => deliverNotifications(db, mail) },
-    { name: 'gas-alerts', intervalMs: 3_600_000, run: () => checkGasRunways(db, chain) },
+    ...(treasury ? [{ name: 'treasury', intervalMs: 60_000, run: () => treasury.run() }] : []),
     ...(telegramCall ? [
       { name: 'telegram-updates', intervalMs: 3000, run: () => pollTelegram(db, telegramCall) },
       { name: 'telegram-delivery', intervalMs: 3000, run: () => deliverTelegram(db, telegramCall) },

@@ -3,8 +3,9 @@ import { id, now, openDb, type Db } from './db.js';
 import { Refusal, type ChainAdapter } from './types.js';
 
 export interface WriteOperation {
-  id: string; kind: 'intent' | 'refund' | 'cancel' | 'subscribe' | 'renew' | 'approval' | 'x402' | 'x402_reservation' | 'replace' | 'financing'; objectId: string;
-  links?: { intentId?: string; refundId?: string; subscriptionId?: string; replacementSubscriptionId?: string; approvalId?: string; previousSubscriptionStatus?: string };
+  id: string; kind: 'intent' | 'refund' | 'cancel' | 'subscribe' | 'renew' | 'approval' | 'x402' | 'x402_reservation' | 'replace' | 'financing' | 'fees' | 'relay' | 'treasury'; objectId: string;
+  /** `merchantId` names whose sponsorship budget a write Pact absorbs counts against. */
+  links?: { intentId?: string; refundId?: string; subscriptionId?: string; replacementSubscriptionId?: string; approvalId?: string; previousSubscriptionStatus?: string; merchantId?: string };
 }
 export interface PreparedWrite { raw: Hex; hash: Hex }
 export interface WriteRecord {
@@ -141,8 +142,9 @@ export class AccountWriter {
     }
     return tx.hash;
   }
-  resolve(hash: Hex, block: bigint, status: 'success' | 'reverted') {
-    this.db.prepare("UPDATE relayer_operations SET phase='confirmed',receipt_block=?,receipt_status=?,updated_at=? WHERE chain_id=? AND relayer=? AND lower(tx_hash)=lower(?) AND phase IN ('broadcasting','submitted','uncertain')").run(block.toString(), status, now(), this.chainId, this.relayer.toLowerCase(), hash);
+  /** Marks the write confirmed, with what it actually cost the relayer in gas when the receipt says. */
+  resolve(hash: Hex, block: bigint, status: 'success' | 'reverted', gasCostWei?: bigint) {
+    this.db.prepare("UPDATE relayer_operations SET phase='confirmed',receipt_block=?,receipt_status=?,gas_cost_wei=COALESCE(?,gas_cost_wei),updated_at=? WHERE chain_id=? AND relayer=? AND lower(tx_hash)=lower(?) AND phase IN ('broadcasting','submitted','uncertain')").run(block.toString(), status, gasCostWei?.toString() ?? null, now(), this.chainId, this.relayer.toLowerCase(), hash);
     this.db.prepare('DELETE FROM relayer_write_block WHERE lower(tx_hash)=lower(?)').run(hash);
   }
   // Explicit OFFLINE operator path; deliberately not exposed by an HTTP route.
@@ -175,7 +177,7 @@ export class AccountWriter {
       for (const row of rows) {
         try {
           const receipt = await chain.receipt(row.tx_hash!);
-          if (receipt && receipt.txHash.toLowerCase() === row.tx_hash!.toLowerCase() && receipt.block <= safe && ['success', 'reverted'].includes(receipt.status)) this.resolve(row.tx_hash!, receipt.block, receipt.status);
+          if (receipt && receipt.txHash.toLowerCase() === row.tx_hash!.toLowerCase() && receipt.block <= safe && ['success', 'reverted'].includes(receipt.status)) this.resolve(row.tx_hash!, receipt.block, receipt.status, receipt.gasCostWei);
         } catch { /* Missing receipts/read errors never prove a dropped tx. */ }
       }
     } catch { /* Leave persisted uncertainty unchanged. */ }

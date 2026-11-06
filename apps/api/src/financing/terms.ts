@@ -34,10 +34,11 @@ export const paymentGas = (holders: number) => Math.min(900_000, 200_000 + 75_00
  * Constructor arguments, in the contract's Config order. `predecessors` are earlier receivables
  * deployments whose pledged invoices and acknowledgements the new one refuses to list again.
  */
-export function receivablesConfig(addresses: { usdt: `0x${string}`; router: `0x${string}`; registry: `0x${string}`; feeVault: `0x${string}`; predecessors?: `0x${string}`[] }) {
+/** The receivables constructor config. `fees` is the FeeSchedule: its recipient takes the sale fee. */
+export function receivablesConfig(addresses: { usdt: `0x${string}`; router: `0x${string}`; registry: `0x${string}`; fees: `0x${string}`; predecessors?: `0x${string}`[] }) {
   const t = FINANCING_TERMS;
   return {
-    usdt: addresses.usdt, router: addresses.router, registry: addresses.registry, feeVault: addresses.feeVault,
+    usdt: addresses.usdt, router: addresses.router, registry: addresses.registry, fees: addresses.fees,
     feeBps: t.feeBps, reserveBps: t.reserveBps, lateFeeBps: t.lateFeeBps, maxDiscountBps: t.maxDiscountBps,
     gracePeriod: t.gracePeriodSeconds, recordPeriod: t.recordPeriodSeconds, minShare: t.minShareMinor, maxHolders: t.maxHolders,
     predecessors: addresses.predecessors ?? [],

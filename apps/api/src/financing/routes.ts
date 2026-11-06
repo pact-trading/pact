@@ -70,6 +70,13 @@ export function mountFinancingWallets(app: Hono, financing: FinancingService, id
     return c.json(json(await financing.relayCancelOrders(address, 'receivables', b)));
   });
 
+  // USDT the contract could not deliver to this wallet: withdrawn with a signature Pact relays.
+  app.post('/v1/financing/withdraw', async c => c.json(json(await financing.prepareWithdraw(await wallet(c)))));
+  app.post('/v1/financing/withdraw/relay', async c => {
+    const address = await wallet(c), b = await body(c);
+    return c.json(json(await financing.relayWithdraw(address, b)));
+  });
+
   app.post('/v1/compliance/orders/cancel', async c => c.json(json(await financing.prepareCancelOrders(await wallet(c), 'registry'))));
   app.post('/v1/compliance/orders/cancel/relay', async c => {
     const officer = await wallet(c), b = await body(c);
@@ -101,12 +108,12 @@ export function mountFinancingMerchant(app: Hono, financing: FinancingService) {
   };
   app.get('/v1/financing', async c => c.json(json(await financing.overview(auth(c).merchantId))));
   app.get('/v1/financing/invoices/:id', async c => c.json(json(await financing.invoice(auth(c).merchantId, c.req.param('id')))));
+  // The merchant signs; Pact's relayer submits. A listing and its cancellation cost the merchant
+  // nothing; a buy-back pays its holders and its own gas, in USDT.
   app.post('/v1/financing/invoices/:id/list', async c => c.json(json(await financing.prepareList(auth(c), c.req.param('id')))));
+  app.post('/v1/financing/invoices/:id/list/relay', async c => c.json(json(await financing.relayList(auth(c), c.req.param('id'), await body(c)))));
   app.post('/v1/financing/invoices/:id/cancel', async c => c.json(json(await financing.prepareCancel(auth(c), c.req.param('id')))));
+  app.post('/v1/financing/invoices/:id/cancel/relay', async c => c.json(json(await financing.relayCancel(auth(c), c.req.param('id'), await body(c)))));
   app.post('/v1/financing/invoices/:id/buy-back', async c => c.json(json(await financing.prepareBuyBack(auth(c), c.req.param('id')))));
-  app.post('/v1/financing/invoices/:id/transactions', async c => {
-    const a = auth(c), b = await body(c);
-    await financing.settle(hashes(b.hashes), a.address);
-    return c.json(json(await financing.invoice(a.merchantId, c.req.param('id'))));
-  });
+  app.post('/v1/financing/invoices/:id/buy-back/relay', async c => c.json(json(await financing.relayBuyBack(auth(c), c.req.param('id'), await body(c)))));
 }

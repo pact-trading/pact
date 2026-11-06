@@ -5,7 +5,8 @@ import { mountMerchantTelegram, type TelegramConfig } from './telegram.js';
 import { initDiscounts, mountDiscounts, priceWithDiscount, redeemDiscount, discountView } from './discounts.js';
 import { prepareRefund } from './refund-preparation.js';
 import { merchantIdForAddress, recordRefusal } from './refusals.js';
-import { gasLedger, gasTankDetail, updateGasPolicy } from './gas-tank.js';
+import { acceptanceOffer, acceptTerms, feeLedger, feesDetail, isMerchantSpender, MERCHANT_SPENDERS, merchantPermitTarget, type MerchantSpender } from './fees.js';
+import { SponsorshipBudget } from './sponsorship.js';
 import { drainRuns, initSecurity, refusalsFeed, runDrain, securityLayers } from './security.js';
 import { commerceRoutes } from './commerce/routes.js';
 import { initLinksOrders, mountMerchantLinksOrders } from './commerce/links-orders.js';
@@ -19,22 +20,21 @@ import type { AgentService } from './agents.js';
 import type { LiveX402 } from './x402/live.js';
 import { checkoutSettings, merchantSettings, updateMerchantSettings, paymentRefundWindow, confirmedPaymentTerms } from './merchant-settings.js';
 import { assertSubscriptionAvailable, reserveIntent } from './write-reservations.js';
-import { FundedRenewals } from './funded-renewals.js';
 import { initLivePlans, KeeperRenewals, planRow, planRows, planSummary, subscriptionDetail, subscriptionRows, type Renewals } from './subscriptions-live.js';
-import { APPROVER, ApprovalService, USDT } from './approval.js';
+import { ApprovalService, USDT } from './approval.js';
 import { pendingPaymentIntent } from './payment-state.js';
 import { x402Routes, type X402Service } from './x402/routes.js';
 import { bindSubscriptions } from './subscription-binding.js';
 import { initSubscriptionMandates, readSubscriptionMandate, snapshotSubscriptionMandate } from './subscription-mandates.js';
-import { cancellationTypedData, consentTypedData, mandateTypedData } from './typed-data.js';
+import { cancellationTypedData, mandateTypedData } from './typed-data.js';
 import { Hono, type Context } from 'hono';
 import { cors } from 'hono/cors';
 import { createHash, randomBytes } from 'node:crypto';
-import { decodeFunctionData, encodeAbiParameters, hashTypedData, isAddress, keccak256, recoverTypedDataAddress, toHex, type Address, type Hex } from 'viem';
-import { escrowAbi, receivablesAbi, subscriptionAbi as subscriptionV1Abi, subscriptionV2Abi, FakeChain } from './chain.js';
+import { decodeFunctionData, encodeAbiParameters, isAddress, keccak256, recoverTypedDataAddress, toHex, type Address, type Hex } from 'viem';
+import { escrowAbi, receivablesAbi, subscriptionAbi, FakeChain } from './chain.js';
 import type { Db } from './db.js';
 import { amountMinor, amountString, id, keyHash, now } from './db.js';
-import type { ChainAdapter, IntentRequest, Mandate, MerchantConsent } from './types.js';
+import type { ChainAdapter, IntentRequest, Mandate } from './types.js';
 import { Refusal } from './types.js';
 import { Relayer } from './relayer.js';
 import { enqueueWebhook, replayWebhook } from './webhooks.js';
@@ -45,24 +45,45 @@ import { createInvoice, createInvoiceCheckout, invoiceRow, invoiceView, sendInvo
 import { cancelReminder, initLiveInvoices, invoiceDetail, manualReminders, scheduleReminder, setCustomerName } from './invoices-live.js';
 
 type Auth = { merchantId: string; kind: 'secret' | 'publishable'; address: Address };
+/** Gas Pact budgets for the subscription writes it sends directly and absorbs. */
+const SUBSCRIBE_GAS = 300_000n;
+const CANCEL_GAS = 150_000n;
 type Env = { Variables: { auth: Auth } };
 const json = (value: unknown) => JSON.stringify(value, (_, v: unknown) => typeof v === 'bigint' ? v.toString() : v);
 const bad = (code: string, message = code, status = 400) => new Response(json({ error: { code, message } }), { status, headers: { 'content-type': 'application/json' } });
 const validEmail = (x: unknown) => typeof x === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x);
 const csv = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`;
-export interface AppServices { telegram?: TelegramConfig; renewals?: Renewals; identity?: Identity; wallet?: WalletIdentity; faucet?: LocalFaucet; agents?: AgentService; x402Live?: LiveX402; x402?: X402Service; approval?: ApprovalService; db: Db; chain: ChainAdapter; relayer: Relayer; baseUrl?: string; router?: Address; escrow?: Address; subscription?: Address; financing?: FinancingService; /** Local fork only: the registry owner the faucet impersonates to appoint test officers. */ registryOwner?: Address }
-export function createApp({ telegram, renewals, identity, wallet, faucet, agents, x402Live, x402, db, chain, relayer, approval, financing, registryOwner, baseUrl = 'http://localhost:3001', router = '0x0000000000000000000000000000000000000001', escrow = '0x0000000000000000000000000000000000000002', subscription = '0x0000000000000000000000000000000000000003' }: AppServices) {
+export interface AppServices { telegram?: TelegramConfig; renewals?: Renewals; identity?: Identity; wallet?: WalletIdentity; faucet?: LocalFaucet; agents?: AgentService; x402Live?: LiveX402; x402?: X402Service; approval?: ApprovalService; sponsorship?: SponsorshipBudget; db: Db; chain: ChainAdapter; relayer: Relayer; baseUrl?: string; router?: Address; escrow?: Address; subscription?: Address; /** The FeeSchedule merchants sign their terms with. */ fees?: Address; financing?: FinancingService; /** Local fork only: the registry owner the faucet impersonates to appoint test officers. */ registryOwner?: Address }
+export function createApp({ telegram, renewals, identity, wallet, faucet, agents, x402Live, x402, db, chain, relayer, approval, sponsorship, financing, registryOwner, baseUrl = 'http://localhost:3001', router = '0x0000000000000000000000000000000000000001', escrow = '0x0000000000000000000000000000000000000002', subscription = '0x0000000000000000000000000000000000000003', fees = '0x0000000000000000000000000000000000000005' }: AppServices) {
   if (renewals && (renewals.chain !== chain || renewals.store.db !== db)) throw new Error('Renewals must share the API database and ChainAdapter/AccountWriter');
-  bindSubscriptions(db, subscription, chain.subscriptionVersion);
+  bindSubscriptions(db, subscription);
   initSubscriptionMandates(db);
-  const subscriptionAbi = chain.subscriptionVersion === 2 ? subscriptionV2Abi : subscriptionV1Abi;
   chain.writer.bind(db);
-  renewals ??= new FundedRenewals(db, chain);
+  renewals ??= new KeeperRenewals(db, chain);
   initLivePlans(db);
   initLiveInvoices(db);
   initLinksOrders(db);
   initDiscounts(db);
-  approval ??= new ApprovalService(db, chain, { enabled: false, delegate: '0x3CEc4a4Eff3c1ef0F8F8e1a4f20F98c2c2baBC3f', escrow, minimumAmount: relayer.minimumAmount > 1_000_000n ? relayer.minimumAmount : 1_000_000n });
+  approval ??= new ApprovalService(db, chain, { enabled: true, escrow, minimumAmount: relayer.minimumAmount > 1_000_000n ? relayer.minimumAmount : 1_000_000n });
+  // Pact absorbs the gas of calls that move no money to the merchant, within a budget per merchant.
+  sponsorship ??= new SponsorshipBudget(db);
+  const budget = sponsorship;
+  const usdtPerWbt = async () => (await chain.routerPolicy()).usdtPerWbt;
+  relayer.sponsorship = {
+    assert: (merchant, costWei, price) => { const merchantId = budget.merchantFor(merchant); if (merchantId) budget.assert(merchantId, costWei, price); },
+    record: (merchant, operationId, costWei) => { const merchantId = budget.merchantFor(merchant); if (merchantId) budget.record(operationId, merchantId, costWei, 'intent'); },
+  };
+  approval.budget = {
+    assert: async (merchantId, costWei) => budget.assert(merchantId, costWei, await usdtPerWbt()),
+    record: (merchantId, operationId, costWei) => budget.record(operationId, merchantId, costWei, 'approval'),
+  };
+  /** Budgets a direct write Pact absorbs (subscribe, signed cancel): refuses it when the merchant's budget is spent. */
+  const absorbed = async (merchantId: string, gas: bigint) => {
+    const cost = gas * await chain.gasPrice();
+    budget.assert(merchantId, cost, await usdtPerWbt());
+    return (operationId: string, kind: string) => budget.record(operationId, merchantId, cost, kind);
+  };
+  const merchantSpenders: Record<MerchantSpender, Address> = { escrow, router };
   /** A financed invoice's payment: the claim it pays, or null when it goes to the escrow as usual. */
   const financedRoute = async (paymentId: string) => {
     if (!financing) return null;
@@ -73,6 +94,13 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
   if (financing) {
     approval.receivables = financing.addresses.receivables;
     approval.spenderFor = async paymentId => (await financedRoute(paymentId)) ? financing.addresses.receivables : null;
+    // A buy-back is a merchant-signed Router intent: the merchant pays its holders and its gas, in USDT.
+    financing.attachSponsorship(absorbed);
+    financing.attachIntents({
+      router,
+      quote: maxGas => relayer.quote(maxGas),
+      submit: (request, merchantId) => relayer.submit(request, reserveIntent(db, chain, merchantId, request, 'intent', request.intent.target)),
+    });
   }
   relayer.onRefusal = (request, refusal) => {
     const merchantId = merchantIdForAddress(db, request.intent.merchant);
@@ -121,12 +149,11 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
     wallet?.revoke(identityToken(c));
     return c.json({ ok: true });
   });
-  // Public: what a browser wallet needs to send the merchant's own transactions (tank deposit, cap, approvals, swap).
+  // Public: the contracts a browser wallet signs for. Merchants and customers only sign; Pact's relayer sends.
   app.get('/v1/network', c => {
-    const gasTank = chain instanceof FakeChain ? '0x0000000000000000000000000000000000000004' : (chain as { addresses?: { gasTank?: Address } }).addresses?.gasTank;
     return c.json({
       chainId: 1874, name: 'Whitechain Sepolia', localFork: !!faucet,
-      contracts: { router, escrow, subscription, gasTank: gasTank ?? null, usdt: USDT, sponsoredApprover: APPROVER,
+      contracts: { router, escrow, subscription, fees, usdt: USDT,
         receivables: financing?.addresses.receivables ?? null, investorRegistry: financing?.addresses.registry ?? null },
       // Whitechain testnet DEX (Uniswap v3): swap WBT for USDT, paid straight to a recipient.
       dex: { swapRouter: '0xe208cC685cD95D56E8ec6DEC9816476567fc6962', wrappedNative: '0x4200000000000000000000000000000000000006', fee: 3000 },
@@ -163,7 +190,7 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
   }
   app.route('/v1/commerce', commerceRoutes({ telegram, db, identity, chain, approval, relayer, router, escrow, minimumAmount: relayer.minimumAmount, baseUrl, submitIntent,
     agents, financing,
-    subscriptions: chain.subscriptionVersion === 1 ? { subscription, register: (b, auth) => registerSubscription(b, auth), cancel: (row, b, auth) => relayCancel(row, b, auth), replace: (oldId, b, auth) => relayReplace(oldId, b, { ...auth, kind: 'secret' }) } : undefined }));
+    subscriptions: { subscription, register: (b, auth, customerSubjectId) => registerSubscription(b, auth, customerSubjectId), cancel: (row, b, auth) => cancelBySignature(row, b, auth), replace: (oldId, b, auth) => relayReplace(oldId, b, { ...auth, kind: 'secret' }) } }));
   app.use('/v1/*', async (c, next) => {
     const header = c.req.header('authorization');
     const key = header?.startsWith('Bearer ') ? header.slice(7) : '';
@@ -246,7 +273,7 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
   });
   app.get('/v1/settings', c => c.json(merchantSettings(db, c.get('auth').merchantId)));
   app.post('/v1/settings', c => mutation(c, (b, auth) => updateMerchantSettings(db, auth.merchantId, b)));
-  app.get('/v1/config', c => c.json({ chainId: 1874, merchant: c.get('auth').address, router, escrow, subscription, subscriptionVersion: chain.subscriptionVersion, checkout: checkoutSettings(db, c.get('auth').merchantId) }));
+  app.get('/v1/config', c => c.json({ chainId: 1874, merchant: c.get('auth').address, router, escrow, subscription, fees, checkout: checkoutSettings(db, c.get('auth').merchantId) }));
   const paymentLink = (row: Record<string, string | number | null>) => ({ id: row.id, kind: row.kind, name: row.name, amount: row.amount_minor === null ? null : amountString(row.amount_minor), periodSeconds: row.period_seconds === null ? null : Number(row.period_seconds), status: row.status, visits: Number(row.visits), createdAt: row.created_at, url: `${baseUrl}/l/${row.id}` });
   app.post('/v1/payment-links', c => mutation(c, (b, auth) => {
     if (b.kind !== 'product' && b.kind !== 'tip') throw new Error('Only product and tip payment links are supported; use a plan subscribe URL for subscriptions');
@@ -354,7 +381,7 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
   app.post('/v1/invoices/:id/payments', c => mutation(c, (b, auth) => createInvoiceCheckout(db, auth.merchantId, c.req.param('id'), b, baseUrl)));
   if (financing) {
     mountFinancingMerchant(app as unknown as Hono, financing);
-    // The original listing route: the merchant's wallet sends the prepared transaction.
+    // The original listing route: the listing the merchant signs, relayed by /v1/financing/invoices/:id/list/relay.
     app.post('/v1/invoices/:id/list', async c => c.json(await financing.prepareList(c.get('auth'), c.req.param('id'))));
   } else app.post('/v1/invoices/:id/list', c => bad('financing_unavailable', 'Invoice financing is not connected to the separate receivables contract', 501));
   app.post('/v1/subscriptions/plans', c => mutation(c, (b, auth) => {
@@ -403,7 +430,7 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
     if (!snapshot) return bad('mandate_snapshot_unavailable', 'Original signed terms are unavailable', 409);
     // Signatures remain in the private audit store. The terms endpoint does not
     // confer background authority or mark an unconfirmed registration active.
-    const { payerSignature: _payerSignature, merchantConsent: _consent, ...terms } = snapshot;
+    const { payerSignature: _payerSignature, ...terms } = snapshot;
     return new Response(json({ subscriptionId, status: sub.status, ...terms }), { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
   });
   async function validateSubscription(b: Record<string, unknown>, auth: Auth) {
@@ -416,46 +443,38 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
     catch { throw new Refusal('invalid_mandate'); }
     const expectedPlan = keccak256(toHex(plan.id));
     if (!isAddress(mandate.payer) || mandate.merchant.toLowerCase() !== auth.address.toLowerCase() || mandate.planId !== expectedPlan || mandate.amountCap !== BigInt(plan.amount_minor) || mandate.periodSeconds !== BigInt(plan.period_seconds) || mandate.maxPeriods <= 0 || (plan.max_periods && mandate.maxPeriods > Number(plan.max_periods)) || mandate.endTime <= BigInt(Math.floor(Date.now() / 1000))) throw new Refusal('mandate_mismatch');
-    const typed = mandateTypedData(mandate, subscription, chain.subscriptionVersion === 2 ? '2' : '1');
-    const signer = await recoverTypedDataAddress({ ...typed, signature: b.signature as Hex });
-    let consent: MerchantConsent | undefined;
-    if (chain.subscriptionVersion === 2) {
-      const rawConsent = b.merchantConsent as Record<string, unknown> | undefined;
-      if (!rawConsent || typeof rawConsent.signature !== 'string') throw new Refusal('merchant_consent_required');
-      try { consent = { deadline: BigInt(String(rawConsent.deadline)), signature: rawConsent.signature as Hex }; }
-      catch { throw new Refusal('invalid_merchant_consent'); }
-      if (consent.deadline < BigInt(Math.floor(Date.now() / 1000)) || consent.deadline > mandate.endTime) throw new Refusal('invalid_merchant_consent');
-      let approver: Address;
-      try { approver = await recoverTypedDataAddress({ ...consentTypedData(hashTypedData(typed), consent.deadline, subscription), signature: consent.signature }); }
-      catch { throw new Refusal('invalid_merchant_consent'); }
-      if (approver.toLowerCase() !== auth.address.toLowerCase()) throw new Refusal('invalid_merchant_consent');
-    }
+    let signer: Address;
+    try { signer = await recoverTypedDataAddress({ ...mandateTypedData(mandate, subscription), signature: b.signature as Hex }); }
+    catch { throw new Refusal('invalid_signature'); }
     if (signer.toLowerCase() !== mandate.payer.toLowerCase()) throw new Refusal('invalid_signature');
-    return { plan, mandate, consent };
+    return { plan, mandate };
   }
   app.post('/v1/subscriptions', c => mutation(c, (b, auth) => registerSubscription(b, auth)));
   async function registerSubscription(b: Record<string, unknown>, auth: Auth, customerSubjectId?: string) {
-    const { plan, mandate, consent } = await validateSubscription(b, auth);
+    const { plan, mandate } = await validateSubscription(b, auth);
     const price = priceWithDiscount(db, auth.merchantId, b.discountCode, BigInt(plan.amount_minor), plan.id);
     const chainId = keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'address' }], [mandate.payer, mandate.nonce, subscription]));
     if (db.prepare('SELECT 1 FROM subscriptions WHERE chain_id=?').get(chainId)) throw new Refusal('mandate_replay');
     const subId = id('sub');
     let trialEndsAt: string | null = null;
-    const operation = { id: subId, kind: 'subscribe' as const, objectId: subId, links: { subscriptionId: subId } };
+    const operation = { id: subId, kind: 'subscribe' as const, objectId: subId, links: { subscriptionId: subId, merchantId: auth.merchantId } };
+    // Registering moves no money: Pact pays its gas, within the merchant's sponsorship budget.
+    const spend = await absorbed(auth.merchantId, SUBSCRIBE_GAS);
     chain.writer.reserve(operation, () => {
       if (db.prepare('SELECT 1 FROM subscriptions WHERE chain_id=?').get(chainId)) throw new Refusal('mandate_replay');
       const trialDays = availableTrialDays(db, plan.id, auth.merchantId, mandate.payer, Number(plan.trial_days), customerSubjectId);
       trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86_400_000).toISOString() : null;
       db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,retry_count,pending_tx_hash,created_at,trial_ends_at,trial_customer_subject_id,discount_code,amount_gross_minor,amount_discount_minor,discount_duration,discount_periods) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(subId, auth.merchantId, plan.id, chainId, mandate.payer.toLowerCase(), 'pending', trialEndsAt ?? now(), 0, null, now(), trialEndsAt, customerSubjectId ?? (db.prepare('SELECT subject_id FROM commerce_customers WHERE merchant_id=? AND lower(wallet)=lower(?) LIMIT 1').get(auth.merchantId, mandate.payer) as { subject_id: string } | undefined)?.subject_id ?? null, price.code, price.gross.toString(), price.discount.toString(), price.duration, price.periods);
       redeemDiscount(db, auth.merchantId, price.code);
-      snapshotSubscriptionMandate(db, subId, { manager: subscription, version: chain.subscriptionVersion, mandate, payerSignature: b.signature as Hex, merchantConsent: consent });
+      snapshotSubscriptionMandate(db, subId, { manager: subscription, mandate, payerSignature: b.signature as Hex });
     });
-    const txHash = await chain.subscribe(mandate, b.signature as Hex, operation, consent);
+    const txHash = await chain.subscribe(mandate, b.signature as Hex, operation);
+    spend(operation.id, 'subscribe');
     if (chain instanceof FakeChain && chain.autoSettle) { chain.emit({ id: `${txHash}:subscribe`, txHash, contract: 'subscription', name: 'Subscribed', args: { id: chainId, payer: mandate.payer, merchant: auth.address, planId: mandate.planId } }); chain.block += 2n; await new Indexer(db, chain).poll(); }
     return { id: subId, chainId, status: chain instanceof FakeChain && chain.autoSettle ? (trialEndsAt ? 'trialing' : 'active') : 'pending', trialEndsAt, txHash, ...discountView(price.gross.toString(), price.discount.toString(), price.code), amountFirstMinor: price.net.toString() };
   }
   app.post('/v1/subscriptions/:id/replace', c => mutation(c, (b, auth) => relayReplace(c.req.param('id'), b, auth)));
-  /** Relays a payer-signed V1 replace intent: the new mandate and the old one's cancellation, atomically. */
+  /** Relays a payer-signed replace intent: the new mandate and the old one's cancellation, atomically. */
   async function relayReplace(oldId: string, b: Record<string, unknown>, auth: Auth) {
     const old = db.prepare('SELECT * FROM subscriptions WHERE id=? AND merchant_id=?').get(oldId, auth.merchantId) as Record<string, string> | undefined;
     if (!old) throw new Refusal('subscription_not_found');
@@ -473,7 +492,7 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
     let call: { functionName: string; args?: readonly unknown[] };
     try { call = decodeFunctionData({ abi: subscriptionAbi, data: request.data }); } catch { throw new Refusal('replace_mismatch'); }
     if (call.functionName !== 'replace' || String(call.args![0]).toLowerCase() !== old.chain_id.toLowerCase() || request.intent.signer.toLowerCase() !== old.payer.toLowerCase() || request.intent.target.toLowerCase() !== subscription.toLowerCase() || request.intent.merchant.toLowerCase() !== auth.address.toLowerCase()) throw new Refusal('replace_mismatch');
-    const { plan, mandate, consent } = await validateSubscription({ planId: b.planId, mandate: call.args![1], signature: call.args![2], merchantConsent: chain.subscriptionVersion === 2 ? { deadline: call.args![3], signature: call.args![4] } : undefined }, auth);
+    const { plan, mandate } = await validateSubscription({ planId: b.planId, mandate: call.args![1], signature: call.args![2] }, auth);
     if (mandate.payer.toLowerCase() !== old.payer.toLowerCase() || request.intent.amount !== mandate.amountCap) throw new Refusal('replace_mismatch');
     const chainId = keccak256(encodeAbiParameters([{ type: 'address' }, { type: 'uint256' }, { type: 'address' }], [mandate.payer, mandate.nonce, subscription]));
     const subId = id('sub');
@@ -484,7 +503,7 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
       if (db.prepare('SELECT 1 FROM subscriptions WHERE chain_id=?').get(chainId)) throw new Refusal('mandate_replay');
       db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,created_at,trial_ends_at,trial_customer_subject_id) VALUES (?,?,?,?,?,?,?,?,?,?)')
         .run(subId, auth.merchantId, plan.id, chainId, mandate.payer.toLowerCase(), 'pending', old.status === 'trialing' ? old.trial_ends_at : now(), now(), old.status === 'trialing' ? old.trial_ends_at : null, old.trial_customer_subject_id ?? null);
-      snapshotSubscriptionMandate(db, subId, { manager: subscription, version: chain.subscriptionVersion, mandate, payerSignature: call.args![2] as Hex, merchantConsent: consent });
+      snapshotSubscriptionMandate(db, subId, { manager: subscription, mandate, payerSignature: call.args![2] as Hex });
       db.prepare('INSERT INTO subscription_replacements VALUES (?,?,?)').run(intentId, old.id, subId);
       if (old.status === 'trialing') db.prepare("INSERT OR IGNORE INTO reminders(invoice_id,stage,created_at) SELECT ?,stage,created_at FROM reminders WHERE invoice_id=? AND stage='trial_will_end'").run(subId, old.id);
     });
@@ -504,26 +523,13 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
     if (!sub) return bad('subscription_not_found', 'subscription_not_found', 404);
     return c.json({ id: sub.id, ...renewals.status(sub.id) });
   });
-  app.post('/v1/subscriptions/:id/renew', c => mutation(c, async (b, auth) => {
+  app.post('/v1/subscriptions/:id/renew', c => mutation(c, async (_b, auth) => {
     const s = db.prepare('SELECT s.*,p.amount_minor FROM subscriptions s JOIN plans p ON p.id=s.plan_id WHERE s.id=? AND s.merchant_id=?').get(c.req.param('id'), auth.merchantId) as Record<string, string> | undefined;
     if (!s) throw new Refusal('subscription_not_found');
-    if (renewals instanceof KeeperRenewals) {
-      // The contract decides: an early, cancelled or over-cap pull is refused on chain with its reason.
-      const result = await renewals.renew(s.id, { force: true });
-      const outcome = await renewalOutcome(s.id, result.txHash!);
-      return { id: s.id, status: outcome.refusal ? 'refused' : outcome.charged ? 'charged' : 'submitted', txHash: result.txHash, refusal: outcome.refusal, subscription: subscriptionDetail(db, subscriptionRows(db, 'id=?', s.id)[0]) };
-    }
-    const refuse = (reason: string, message = reason) => { db.prepare('INSERT INTO refusal_attempts (id,merchant_id,object_id,reason,tx_hash,created_at) VALUES (?,?,?,?,?,?)').run(id('refusal'), auth.merchantId, s.id, reason, null, now()); throw new Refusal(reason, message); };
-    if (s.status === 'cancelled') refuse('cancelled', 'Subscription was cancelled');
-    const amount = b.amount === undefined ? BigInt(s.amount_minor) : amountMinor(b.amount);
-    if (amount > BigInt(s.amount_minor)) refuse('cap_exceeded', 'Amount exceeds the approved cap');
-    if (amount !== BigInt(s.amount_minor)) refuse('renewal_amount_mismatch', 'Renewal amount must match the authorized plan');
-    if (new Date(s.next_charge_at).getTime() > Date.now()) { db.prepare('INSERT INTO refusal_attempts (id,merchant_id,object_id,reason,tx_hash,created_at) VALUES (?,?,?,?,?,?)').run(id('refusal'), auth.merchantId, s.id, 'too_early', null, now()); throw new Refusal('too_early', 'Renewal is too early'); }
-    const result = await renewals.renew(s.id);
-    if (result.automatic === 'disabled') throw new Refusal('automatic_funded_renewal_disabled');
-    if (!result.txHash) throw new Refusal(result.reason);
-    if (chain instanceof FakeChain && chain.autoSettle) await new Indexer(db, chain).poll();
-    return { id: s.id, status: 'submitted', txHash: result.txHash };
+    // The contract decides: an early, cancelled or over-cap pull is refused on chain with its reason.
+    const result = await renewals.renew(s.id, { force: true });
+    const outcome = await renewalOutcome(s.id, result.txHash!);
+    return { id: s.id, status: outcome.refusal ? 'refused' : outcome.charged ? 'charged' : 'submitted', txHash: result.txHash, refusal: outcome.refusal, subscription: subscriptionDetail(db, subscriptionRows(db, 'id=?', s.id)[0]) };
   }));
   app.post('/v1/subscriptions/:id/cancel', c => mutation(c, async (b, auth) => {
     const s = db.prepare('SELECT * FROM subscriptions WHERE id=? AND merchant_id=?').get(c.req.param('id'), auth.merchantId) as Record<string, string> | undefined;
@@ -538,23 +544,30 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
       })();
       return { id: s.id, status: 'cancelled', cancelledAt: (db.prepare('SELECT cancelled_at FROM subscriptions WHERE id=?').get(s.id) as { cancelled_at: string }).cancelled_at, cancelledBy: 'merchant' };
     }
-    if (chain.subscriptionVersion === 2) {
-      let deadline: bigint;
-      try { deadline = BigInt(String(b.deadline)); } catch { throw new Refusal('invalid_cancellation'); }
-      const current = BigInt(Math.floor(Date.now() / 1000));
-      if (deadline < current || deadline > current + 300n || typeof b.signature !== 'string') throw new Refusal('invalid_cancellation');
-      let signer: Address;
-      try { signer = await recoverTypedDataAddress({ ...cancellationTypedData(s.chain_id as Hex, deadline, subscription), signature: b.signature as Hex }); }
-      catch { throw new Refusal('invalid_signature'); }
-      if (signer.toLowerCase() !== s.payer.toLowerCase()) throw new Refusal('invalid_signature');
-      const operation = { id: id('cancel'), kind: 'cancel' as const, objectId: s.id, links: { subscriptionId: s.id } };
-      chain.writer.reserve(operation, () => assertSubscriptionAvailable(db, s.id));
-      const txHash = await chain.cancelSigned(s.chain_id as Hex, deadline, b.signature as Hex, operation);
-      if (chain instanceof FakeChain && chain.autoSettle) await new Indexer(db, chain).poll();
-      return { id: s.id, status: 'submitted', txHash };
-    }
-    return relayCancel(s, b, auth);
+    return cancelBySignature(s, b, auth);
   }));
+  /**
+   * The payer's signed cancellation (EIP-712 `Cancel`), submitted by Pact's relayer: the payer needs no
+   * gas and the merchant pays nothing. Used by the merchant API and the customer portal.
+   */
+  async function cancelBySignature(s: Record<string, string>, b: Record<string, unknown>, auth: { merchantId: string; address: Address }) {
+    if (!s.chain_id || s.status === 'cancelled') throw new Refusal('subscription_unavailable');
+    let deadline: bigint;
+    try { deadline = BigInt(String(b.deadline)); } catch { throw new Refusal('invalid_cancellation'); }
+    const current = BigInt(Math.floor(Date.now() / 1000));
+    if (deadline < current || deadline > current + 300n || typeof b.signature !== 'string') throw new Refusal('invalid_cancellation');
+    let signer: Address;
+    try { signer = await recoverTypedDataAddress({ ...cancellationTypedData(s.chain_id as Hex, deadline, subscription), signature: b.signature as Hex }); }
+    catch { throw new Refusal('invalid_signature'); }
+    if (signer.toLowerCase() !== s.payer.toLowerCase()) throw new Refusal('invalid_signature');
+    const spend = await absorbed(auth.merchantId, CANCEL_GAS);
+    const operation = { id: id('cancel'), kind: 'cancel' as const, objectId: s.id, links: { subscriptionId: s.id, merchantId: auth.merchantId } };
+    chain.writer.reserve(operation, () => assertSubscriptionAvailable(db, s.id));
+    const txHash = await chain.cancelSigned(s.chain_id as Hex, deadline, b.signature as Hex, operation);
+    spend(operation.id, 'cancel');
+    if (chain instanceof FakeChain && chain.autoSettle) await new Indexer(db, chain).poll();
+    return { id: s.id, status: 'submitted', txHash };
+  }
   /** Waits (1-second blocks) until the indexer has seen the renewal transaction's charge or refusal. */
   async function renewalOutcome(subscriptionId: string, txHash: Hex, seconds = 30) {
     for (let i = 0; i < seconds * 2; i++) {
@@ -565,16 +578,6 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
       await new Promise(r => setTimeout(r, 500));
     }
     return { refusal: null, charged: false };
-  }
-  /** Relays a payer-signed V1 cancel intent; the merchant's tank pays its gas. */
-  async function relayCancel(s: Record<string, string>, b: Record<string, unknown>, auth: { merchantId: string; address: Address }) {
-    const request = normalizeIntent(b as unknown as IntentRequest);
-    const call = decodeFunctionData({ abi: subscriptionAbi, data: request.data });
-    if (call.functionName !== 'cancel' || String(call.args![0]).toLowerCase() !== s.chain_id.toLowerCase() || request.intent.signer.toLowerCase() !== s.payer.toLowerCase() || request.intent.target.toLowerCase() !== subscription.toLowerCase() || request.intent.merchant.toLowerCase() !== auth.address.toLowerCase()) throw new Refusal('cancel_mismatch');
-    const operation = reserveIntent(db, chain, auth.merchantId, request, 'cancel', s.id, { subscriptionId: s.id, previousSubscriptionStatus: s.status }, () => assertSubscriptionAvailable(db, s.id));
-    const txHash = await relayer.submit(request, operation);
-    if (chain instanceof FakeChain && chain.autoSettle) { chain.emit({ id: `${txHash}:cancel`, txHash, contract: 'subscription', name: 'Cancelled', args: { id: s.chain_id } }); chain.block += 2n; await new Indexer(db, chain).poll(); }
-    return { id: s.id, status: 'submitted', txHash };
   }
   app.post('/v1/intents', c => mutation(c, submitIntent));
   async function submitIntent(b: Record<string, unknown>, auth: { merchantId: string; address: Address }) {
@@ -595,12 +598,15 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
       let call: { functionName: string; args?: readonly unknown[] };
       try { call = decodeFunctionData({ abi: escrowAbi, data: request.data }); } catch { throw new Refusal('wrong_selector'); }
       if (call.functionName === 'refund') throw new Refusal('use_refund_endpoint');
-      if (call.functionName === 'charge' || call.functionName === 'authorize') {
+      if (['charge', 'chargeInvoice', 'authorize'].includes(call.functionName)) {
         chargePaymentId = String(call.args![0]);
         const p = db.prepare('SELECT * FROM payments WHERE id=? AND merchant_id=?').get(String(call.args![0]), auth.merchantId) as Record<string, string> | undefined;
         if (!p || !['open', 'failed'].includes(p.status) || BigInt(String(call.args![2])) !== BigInt(p.amount_minor) || String(call.args![1]).toLowerCase() !== auth.address.toLowerCase() || request.intent.amount !== BigInt(p.amount_minor)) throw new Refusal('payment_mismatch');
+        // The invoice rate is for invoices the merchant sent, and every invoice pays at it.
+        const invoice = !!(JSON.parse(p.metadata ?? '{}') as { invoiceId?: string }).invoiceId;
+        if ((call.functionName === 'chargeInvoice') !== invoice) throw new Refusal('payment_mismatch', invoice ? 'Invoice payments use chargeInvoice' : 'Only invoice payments use chargeInvoice');
         const window = paymentRefundWindow(db, p.id);
-        if (window !== null && BigInt(String(call.args![call.functionName === 'charge' ? 3 : 4])) !== BigInt(window)) throw new Refusal('refund_window_mismatch');
+        if (window !== null && BigInt(String(call.args![call.functionName === 'authorize' ? 4 : 3])) !== BigInt(window)) throw new Refusal('refund_window_mismatch');
         // A financed invoice is paid to the receivables contract, which pays the investors: never the escrow.
         if (await financedRoute(p.id)) throw new Refusal('invoice_financed');
       }
@@ -643,18 +649,37 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
     if (chain instanceof FakeChain && chain.autoSettle) await new Indexer(db, chain).poll();
     return { id: intentId, status: 'submitted', txHash: hash };
   }
-  app.get('/v1/gas-tank', async c => c.json(await gasTankDetail(db, chain, relayer, c.get('auth'), { localFaucet: !!faucet })));
-  app.get('/v1/gas-tank/ledger', c => {
+  // Fees: the terms the merchant signed, its standing permits, and every fee Pact took.
+  app.get('/v1/fees', async c => c.json(await feesDetail(db, chain, approval!, c.get('auth'), merchantSpenders)));
+  app.get('/v1/fees/ledger', c => {
     const limit = Number(c.req.query('limit') ?? '50');
-    return c.json({ data: gasLedger(db, c.get('auth').merchantId, Number.isInteger(limit) ? limit : 50) });
+    return c.json({ data: feeLedger(db, c.get('auth').merchantId, Number.isInteger(limit) ? limit : 50) });
   });
-  app.post('/v1/gas-tank/policy', c => mutation(c, async (body, auth) => {
-    updateGasPolicy(db, auth.merchantId, body);
-    return gasTankDetail(db, chain, relayer, auth, { localFaucet: !!faucet });
+  app.get('/v1/fees/terms', async c => { c.header('Cache-Control', 'no-store'); return c.json(await acceptanceOffer(chain, fees, c.get('auth'))); });
+  app.post('/v1/fees/terms/accept', c => mutation(c, (b, auth) => {
+    if (auth.kind !== 'secret') throw new Refusal('secret_key_required');
+    return acceptTerms(chain, fees, auth, b, budget);
   }));
+  app.get('/v1/fees/permits/:spender', async c => {
+    c.header('Cache-Control', 'no-store');
+    const spender = c.req.param('spender');
+    if (!isMerchantSpender(spender)) return bad('unknown_spender', `Expected one of ${MERCHANT_SPENDERS.join(', ')}`, 404);
+    return c.json(await approval!.getFor(merchantPermitTarget(c.get('auth'), spender, merchantSpenders)));
+  });
+  // Permit progress is durable per spender; the attempt identity, not idempotency caching, dedupes it.
+  app.post('/v1/fees/permits/:spender', async c => {
+    const spender = c.req.param('spender'), auth = c.get('auth');
+    if (!isMerchantSpender(spender)) return bad('unknown_spender', `Expected one of ${MERCHANT_SPENDERS.join(', ')}`, 404);
+    if (auth.kind !== 'secret') return bad('secret_key_required', 'secret_key_required', 403);
+    let body: Record<string, unknown>;
+    try { body = await c.req.json(); if (!body || typeof body !== 'object' || Array.isArray(body)) return bad('invalid_json'); }
+    catch { return bad('invalid_json'); }
+    try { return c.json(await approval!.submitFor(merchantPermitTarget(auth, spender, merchantSpenders), body)); }
+    catch (e) { return bad(e instanceof Refusal ? e.code : 'approval_unavailable', e instanceof Refusal ? e.message : 'Approval is unavailable', e instanceof Refusal ? 422 : 503); }
+  });
   app.get('/v1/export', c => {
     try {
-      const report = accountantExport(db, c.get('auth').merchantId, { from: c.req.query('from'), to: c.req.query('to'), format: c.req.query('format') }, process.env.WBT_USD_ESTIMATE);
+      const report = accountantExport(db, c.get('auth').merchantId, { from: c.req.query('from'), to: c.req.query('to'), format: c.req.query('format') });
       if (c.req.query('format') === 'csv') return c.body(report.csv, 200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="settle-export.csv"' });
       const { csv: _csv, ...data } = report;
       return c.json(data);
@@ -686,17 +711,16 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
   // The key itself is never stored; the list shows its kind and name only.
   app.get('/v1/api-keys', c => c.json({ data: db.prepare('SELECT id,name,kind,created_at AS createdAt,revoked_at AS revokedAt FROM api_keys WHERE merchant_id=? ORDER BY created_at DESC').all(c.get('auth').merchantId) }));
   app.get('/v1/preferences', c => {
-    const row = db.prepare('SELECT brand_color,fee_mode FROM merchant_preferences WHERE merchant_id=?').get(c.get('auth').merchantId) as { brand_color: string; fee_mode: string } | undefined;
-    return c.json({ brandColor: row?.brand_color ?? '#c8f169', feeMode: row?.fee_mode ?? 'merchant' });
+    const row = db.prepare('SELECT brand_color FROM merchant_preferences WHERE merchant_id=?').get(c.get('auth').merchantId) as { brand_color: string } | undefined;
+    return c.json({ brandColor: row?.brand_color ?? '#c8f169' });
   });
   app.post('/v1/preferences', c => mutation(c, (b, auth) => {
-    const current = db.prepare('SELECT brand_color,fee_mode FROM merchant_preferences WHERE merchant_id=?').get(auth.merchantId) as { brand_color: string; fee_mode: string } | undefined;
+    if (Object.keys(b).some(k => k !== 'brandColor')) throw new Refusal('unexpected_field', 'Only brandColor can be set');
+    const current = db.prepare('SELECT brand_color FROM merchant_preferences WHERE merchant_id=?').get(auth.merchantId) as { brand_color: string } | undefined;
     const brandColor = b.brandColor === undefined ? current?.brand_color ?? '#c8f169' : String(b.brandColor);
-    const feeMode = b.feeMode === undefined ? current?.fee_mode ?? 'merchant' : String(b.feeMode);
     if (!/^#[0-9a-f]{6}$/i.test(brandColor)) throw new Refusal('invalid_brand_color');
-    if (!['merchant', 'customer'].includes(feeMode)) throw new Refusal('invalid_fee_mode');
-    db.prepare('INSERT INTO merchant_preferences VALUES (?,?,?,?) ON CONFLICT(merchant_id) DO UPDATE SET brand_color=excluded.brand_color,fee_mode=excluded.fee_mode,updated_at=excluded.updated_at').run(auth.merchantId, brandColor.toLowerCase(), feeMode, now());
-    return { brandColor: brandColor.toLowerCase(), feeMode };
+    db.prepare('INSERT INTO merchant_preferences VALUES (?,?,?) ON CONFLICT(merchant_id) DO UPDATE SET brand_color=excluded.brand_color,updated_at=excluded.updated_at').run(auth.merchantId, brandColor.toLowerCase(), now());
+    return { brandColor: brandColor.toLowerCase() };
   }));
   app.post('/v1/api-keys/:id/revoke', c => { db.prepare('UPDATE api_keys SET revoked_at=? WHERE id=? AND merchant_id=?').run(now(), c.req.param('id'), c.get('auth').merchantId); return c.json({ revoked: true }); });
   return app;
@@ -704,7 +728,7 @@ export function createApp({ telegram, renewals, identity, wallet, faucet, agents
 function normalizeIntent(input: IntentRequest): IntentRequest {
   if (!input || !input.intent || !input.signature || !input.data) throw new Refusal('invalid_intent');
   const i = input.intent;
-  try { return { signature: input.signature, data: input.data, intent: { signer: i.signer, merchant: i.merchant, target: i.target, dataHash: i.dataHash, amount: BigInt(i.amount), feeUSDT: BigInt(i.feeUSDT), nonce: BigInt(i.nonce), deadline: BigInt(i.deadline), maxGas: Number(i.maxGas) } }; }
+  try { return { signature: input.signature, data: input.data, intent: { signer: i.signer, merchant: i.merchant, target: i.target, dataHash: i.dataHash, amount: BigInt(i.amount), nonce: BigInt(i.nonce), deadline: BigInt(i.deadline), maxGas: Number(i.maxGas) } }; }
   catch { throw new Refusal('invalid_intent'); }
 }
 function canonicalIntent(input: IntentRequest): string {

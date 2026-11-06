@@ -9,7 +9,8 @@ import { IdentityError, type VerifiedIdentity } from '../identity.js';
 import { checkoutSettings } from '../merchant-settings.js';
 import type { Relayer } from '../relayer.js';
 import { planRow, planSummary, subscriptionDetail, subscriptionRows } from '../subscriptions-live.js';
-import { intentTypedData, mandateTypedData } from '../typed-data.js';
+import { cancellationTypedData, intentTypedData, mandateTypedData } from '../typed-data.js';
+import { assertSubscriptionAvailable } from '../write-reservations.js';
 import type { ChainAdapter } from '../types.js';
 
 export interface PayerSubscriptionServices {
@@ -24,9 +25,10 @@ const json = (value: unknown) => JSON.parse(JSON.stringify(value, (_, v) => (typ
 const bad = (code: string, status: 400 | 403 | 404 | 409 = 400): never => { throw new IdentityError(code, status); };
 
 /**
- * The customer side of subscriptions. The payer signs messages only: a one-time USDT approval for
- * the SubscriptionManager (relayed, no gas), the mandate (capped per period, in the contract), and a
- * cancel intent. Relayed through the merchant's tank or the keeper; the customer never pays gas.
+ * The customer side of subscriptions. The payer signs messages only: a one-time USDT permit for the
+ * SubscriptionManager, the mandate (capped per period, in the contract), and a cancellation. Pact's
+ * relayer submits each one and pays the gas: neither the customer nor the merchant pays for it. Each
+ * renewal pays the merchant less Pact's fee.
  */
 export function mountPayerSubscriptions(app: Hono, s: PayerSubscriptionServices, payer: (c: Context) => Promise<VerifiedIdentity>) {
   const { db } = s;
@@ -70,7 +72,7 @@ export function mountPayerSubscriptions(app: Hono, s: PayerSubscriptionServices,
       periodSeconds: period, maxPeriods: periods, endTime: BigInt(Math.floor(Date.now() / 1000)) + BigInt(plan.trial_days ?? 0) * 86_400n + period * BigInt(periods + 1) + 86_400n,
       nonce: await s.chain.mandateNonce(user.wallet.address),
     };
-    return c.json(json({ approvalKey: key, approval, mandate, typedData: mandateTypedData(mandate, s.subscription, '1') }));
+    return c.json(json({ approvalKey: key, approval, mandate, typedData: mandateTypedData(mandate, s.subscription) }));
   });
   app.get('/plans/:id/approval/:key', async c => {
     const user = await payer(c), plan = activePlan(c.req.param('id'));
@@ -129,21 +131,18 @@ export function mountPayerSubscriptions(app: Hono, s: PayerSubscriptionServices,
     }) });
   });
   app.get('/me/subscriptions/:id', async c => { const user = await payer(c); return c.json(subscriptionDetail(db, own(c, user))); });
+  // The cancellation to sign (EIP-712 `Cancel`), valid five minutes; Pact's relayer submits it.
   app.post('/me/subscriptions/:id/cancel-intent', async c => {
     const user = await payer(c), row = own(c, user);
     if (row.status === 'cancelled' || !row.chain_id) return bad('subscription_unavailable', 409);
-    const plan = planRow(db, row.plan_id)!, merchant = merchantOf(row.merchant_id);
-    const data = encodeFunctionData({ abi: subscriptionAbi, functionName: 'cancel', args: [row.chain_id] });
-    const quote = await s.relayer.quote();
-    const intent = { signer: user.wallet.address, merchant: merchant.address, target: s.subscription, dataHash: keccak256(data), amount: BigInt(plan.amount_minor), feeUSDT: BigInt(quote.minimumFeeMinor), nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
-    return c.json(json({ data, intent, typedData: intentTypedData(intent, s.router) }));
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 300);
+    return c.json(json({ deadline, typedData: cancellationTypedData(row.chain_id, deadline, s.subscription) }));
   });
   app.post('/me/subscriptions/:id/cancel', async c => {
     const user = await payer(c), row = own(c, user), b = await body(c);
-    const intent = b.intent as Record<string, unknown> | undefined;
-    if (!intent || String(intent.signer).toLowerCase() !== user.wallet.address.toLowerCase()) return bad('payer_mismatch', 403);
+    if (typeof b.signature !== 'string' || b.deadline === undefined) return bad('signed_cancellation_required');
     const merchant = merchantOf(row.merchant_id);
-    return c.json(await s.cancel(row as unknown as Record<string, string>, b, { merchantId: merchant.id, address: merchant.address }));
+    return c.json(await s.cancel(row as unknown as Record<string, string>, { deadline: b.deadline, signature: b.signature }, { merchantId: merchant.id, address: merchant.address }));
   });
 
   // Plan change: a new mandate, then a payer-signed Router intent that swaps the old one for it.
@@ -167,6 +166,8 @@ export function mountPayerSubscriptions(app: Hono, s: PayerSubscriptionServices,
   });
   app.post('/me/subscriptions/:id/change-intent', async c => {
     const user = await payer(c), b = await body(c), { row, plan } = changeTarget(c, user, b.planId);
+    // A charge still confirming would make the swap fail after the customer signed: refuse before any signature.
+    assertSubscriptionAvailable(db, row.id);
     const key = b.approvalKey === undefined ? `subapr_${randomBytes(12).toString('hex')}` : validKey(b.approvalKey);
     const approval = await s.approval.getFor(changeApproval(row, plan, user, key));
     const merchant = merchantOf(plan.merchant_id);
@@ -174,7 +175,7 @@ export function mountPayerSubscriptions(app: Hono, s: PayerSubscriptionServices,
     const period = BigInt(plan.period_seconds);
     const mandate = { payer: user.wallet.address, merchant: merchant.address, planId: keccak256(toHex(plan.id)), amountCap: BigInt(plan.amount_minor), periodSeconds: period, maxPeriods: periods,
       endTime: BigInt(Math.max(Math.floor(Date.now() / 1000), row.status === 'trialing' && row.trial_ends_at ? Math.ceil(Date.parse(row.trial_ends_at) / 1000) : 0)) + period * BigInt(periods + 1) + 86_400n, nonce: await s.chain.mandateNonce(user.wallet.address) };
-    return c.json(json({ approvalKey: key, approval, mandate, typedData: mandateTypedData(mandate, s.subscription, '1') }));
+    return c.json(json({ approvalKey: key, approval, mandate, typedData: mandateTypedData(mandate, s.subscription) }));
   });
   app.post('/me/subscriptions/:id/change-route', async c => {
     const user = await payer(c), b = await body(c), { row, plan } = changeTarget(c, user, b.planId);
@@ -184,7 +185,7 @@ export function mountPayerSubscriptions(app: Hono, s: PayerSubscriptionServices,
     const data = encodeFunctionData({ abi: subscriptionAbi, functionName: 'replace', args: [row.chain_id!, mandate, b.signature as Hex] });
     const quote = await s.relayer.quote();
     const merchant = merchantOf(row.merchant_id);
-    const intent = { signer: user.wallet.address, merchant: merchant.address, target: s.subscription, dataHash: keccak256(data), amount: BigInt(plan.amount_minor), feeUSDT: BigInt(quote.minimumFeeMinor), nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
+    const intent = { signer: user.wallet.address, merchant: merchant.address, target: s.subscription, dataHash: keccak256(data), amount: BigInt(plan.amount_minor), nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
     return c.json(json({ data, intent, typedData: intentTypedData(intent, s.router) }));
   });
   app.post('/me/subscriptions/:id/change', async c => {

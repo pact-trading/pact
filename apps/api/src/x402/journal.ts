@@ -17,15 +17,12 @@ export interface SettlementOperation {
  * submit MUST use AccountWriter's durable chain/signer/nonce/hash phases before broadcasting,
  * sharing nonce allocation with every writer. Raw bytes are not persisted. Never automatically
  * resend/re-sign a broadcasting/submitted/uncertain operation, including after a missing receipt.
- * Enforce merchant gas-tank funding, daily gas budget, rate limits and fee ceilings before
+ * Enforce the per-merchant daily gas budget, rate limits and fee ceilings before
  * signing. Reserve/reconcile budgets transactionally, including failed transactions.
  * Never delete uncertain submissions or reuse their nonces after a timeout.
  */
 export interface X402Journal {
   readonly address: Address;
-  /** Distinct from transaction signer for the explicit funded variant. */
-  readonly settlementCaller?: Address;
-  readonly variant?: 'direct' | 'funded';
   initialize?(publicClient: PublicClient): Promise<void>;
   readonly pending: PendingSettlementStore;
   runOnce(operation: SettlementOperation, execute: () => Promise<SettleResponse>): Promise<SettleResponse>;

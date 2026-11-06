@@ -39,12 +39,12 @@ export function commerceRoutes(s: Services) {
   const receipt = (row: OrderRow) => {
     const payment = db.prepare('SELECT status,tx_hash,refund_deadline FROM payments WHERE id=?').get(row.payment_id) as { status: string; tx_hash: string | null; refund_deadline: string | null } | undefined;
     const refunds = db.prepare('SELECT id,amount_minor AS amountMinor,reason,status,tx_hash AS txHash,created_at AS createdAt FROM refunds WHERE payment_id=? ORDER BY created_at').all(row.payment_id);
-    // Fee and gas of the sponsored payment, from the Router's Executed event for its transaction.
-    const gas = payment?.tx_hash ? db.prepare('SELECT cost_wei,fee_usdt FROM gas_ledger WHERE merchant_id=? AND lower(tx_hash)=lower(?) LIMIT 1').get(row.merchant_id, payment.tx_hash) as { cost_wei: string; fee_usdt: string } | undefined : undefined;
+    // Pact's fee, taken from the payment itself, as the confirmed charge recorded it. Pact pays the gas.
+    const fee = db.prepare("SELECT fee_minor FROM accounting_entries WHERE merchant_id=? AND lower(object_id)=lower(?) AND kind='Payment' ORDER BY block_number LIMIT 1").get(row.merchant_id, row.payment_id) as { fee_minor: string } | undefined;
     const payerAddress = (db.prepare('SELECT payer FROM payments WHERE id=?').get(row.payment_id) as { payer: string | null } | undefined)?.payer ?? null;
     const revision = db.prepare('SELECT payload FROM commerce_product_revisions WHERE product_id=? AND revision=?').get(row.product_id, row.product_revision) as { payload: string };
     const events = db.prepare('SELECT type,source_id AS sourceId,created_at AS createdAt FROM commerce_order_events WHERE order_id=? ORDER BY created_at').all(row.id);
-    return { order: orderView(db, row), product: JSON.parse(revision.payload), brand: checkoutSettings(db, row.merchant_id), payment: payment ? { financialStatus: payment.status, txHash: payment.tx_hash, refundDeadline: payment.refund_deadline, feeMinor: gas?.fee_usdt ?? null, gasWei: gas?.cost_wei ?? null, payer: payerAddress, ...confirmedPaymentTerms(db, row.payment_id!) } : null, refunds, events };
+    return { order: orderView(db, row), product: JSON.parse(revision.payload), brand: checkoutSettings(db, row.merchant_id), payment: payment ? { financialStatus: payment.status, txHash: payment.tx_hash, refundDeadline: payment.refund_deadline, feeMinor: fee?.fee_minor ?? null, payer: payerAddress, ...confirmedPaymentTerms(db, row.payment_id!) } : null, refunds, events };
   };
   const ownedSession = async (c: Context) => {
     const user = await payer(c);
@@ -76,7 +76,7 @@ export function commerceRoutes(s: Services) {
     const auth = db.prepare('SELECT address FROM merchants WHERE id=?').get(row.merchant_id) as { address: Address };
     const data = encodeFunctionData({ abi: escrowAbi, functionName: 'charge', args: [row.payment_id as Hex, auth.address, BigInt(row.amount_minor), BigInt(paymentRefundWindow(db, row.payment_id!)!)] });
     const quote = await s.relayer.quote();
-    const intent = { signer: user.wallet.address, merchant: auth.address, target: s.escrow, dataHash: keccak256(data), amount: BigInt(row.amount_minor), feeUSDT: BigInt(quote.minimumFeeMinor), nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
+    const intent = { signer: user.wallet.address, merchant: auth.address, target: s.escrow, dataHash: keccak256(data), amount: BigInt(row.amount_minor), nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
     return c.json(JSON.parse(JSON.stringify({ data, intent, typedData: intentTypedData(intent, s.router) }, (_, v) => typeof v === 'bigint' ? v.toString() : v)));
   });
   app.post('/checkout-sessions/:id/intent', async c => {

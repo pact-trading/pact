@@ -7,6 +7,7 @@ import {
 import { USDT } from '../token.js';
 import type { ViemChain } from '../chain.js';
 import { Refusal } from '../types.js';
+import { gasCost } from '../approval-chain.js';
 
 const artifact = (name: string): Abi => JSON.parse(readFileSync(process.env.CONTRACT_ARTIFACTS_DIR ? join(process.env.CONTRACT_ARTIFACTS_DIR, `${name}.sol`, `${name}.json`) : new URL(`../../../../contracts/out/${name}.sol/${name}.json`, import.meta.url), 'utf8')).abi as Abi;
 export const receivablesAbi = artifact('InvoiceReceivables');
@@ -56,6 +57,8 @@ export interface FinancingChain {
   isOfficer(account: Address): Promise<boolean>;
   usdtBalance(account: Address): Promise<bigint>;
   allowance(owner: Address, spender: Address): Promise<bigint>;
+  /** USDT the receivables contract could not deliver to an account, waiting for it to withdraw. */
+  claimable(account: Address): Promise<bigint>;
   /** Signed-order nonces: an investor's on the receivables contract, an officer's on the registry. */
   nonce(contract: 'receivables' | 'registry', account: Address): Promise<bigint>;
   /** The EIP-2612 permit domain and nonce of the USDT the contract settles in. */
@@ -63,10 +66,11 @@ export interface FinancingChain {
   /** Keeper calls anyone may make: close a listing at its record date, mark a default after grace. */
   keeper(functionName: 'closeListing' | 'markDefault', claimId: bigint): Promise<Hex>;
   /**
-   * Sends a signed order (purchase, transfer, registry decision) from Pact's relayer, which pays the gas.
-   * The call is simulated first: a revert is returned as its error name and nothing is sent.
+   * Sends a signed order (purchase, transfer, listing, registry decision, USDT permit) from Pact's
+   * relayer, which pays the gas. The call is simulated first: a revert is returned as its error name
+   * and nothing is sent.
    */
-  relay(contract: 'receivables' | 'registry', data: Hex, gas: bigint): Promise<Hex>;
+  relay(contract: 'receivables' | 'registry' | 'usdt', data: Hex, gas: bigint): Promise<Hex>;
 }
 
 const chain = (rpcUrl: string) => defineChain({ id: 1874, name: 'Whitechain Sepolia', nativeCurrency: { name: 'WBT', symbol: 'WBT', decimals: 18 }, rpcUrls: { default: { http: [rpcUrl] } } });
@@ -130,6 +134,7 @@ export class ViemFinancingChain implements FinancingChain {
   async isOfficer(account: Address) { return await this.public.readContract({ address: this.addresses.registry, abi: registryAbi, functionName: 'officers', args: [account] }) as boolean; }
   async usdtBalance(account: Address) { return await this.public.readContract({ address: USDT, abi: erc20Abi, functionName: 'balanceOf', args: [account] }); }
   async allowance(owner: Address, spender: Address) { return await this.public.readContract({ address: USDT, abi: erc20Abi, functionName: 'allowance', args: [owner, spender] }); }
+  async claimable(account: Address) { return await this.public.readContract({ address: this.addresses.receivables, abi: receivablesAbi, functionName: 'claimable', args: [account] }) as bigint; }
   async nonce(contract: 'receivables' | 'registry', account: Address) {
     return await this.public.readContract({ address: this.addresses[contract], abi: contract === 'receivables' ? receivablesAbi : registryAbi, functionName: 'nonces', args: [account] }) as bigint;
   }
@@ -150,12 +155,12 @@ export class ViemFinancingChain implements FinancingChain {
     const hash = await this.send(this.addresses.receivables, data, functionName === 'markDefault' ? 900_000n : 150_000n, `${functionName}:${claimId}`);
     return hash;
   }
-  async relay(contract: 'receivables' | 'registry', data: Hex, gas: bigint): Promise<Hex> {
-    const to = this.addresses[contract];
+  async relay(contract: 'receivables' | 'registry' | 'usdt', data: Hex, gas: bigint): Promise<Hex> {
+    const to = contract === 'usdt' ? USDT : this.addresses[contract];
     try { await this.public.call({ account: this.writerChain.writer.relayer, to, data, gas }); }
     catch (error) {
       // Refuse before sending: a revert would cost Pact gas and tell the user nothing.
-      const name = revertName(error, contract === 'receivables' ? receivablesAbi : registryAbi);
+      const name = revertName(error, contract === 'registry' ? registryAbi : receivablesAbi);
       throw new Refusal('relay_refused', name ?? 'reverted');
     }
     return this.send(to, data, gas, `relay:${contract}`);
@@ -171,7 +176,7 @@ export class ViemFinancingChain implements FinancingChain {
       return prepared;
     }, raw => this.writerChain.broadcastTransaction(raw)), operation.id).catch(error => { writer.notSent(operation.id); throw error; });
     const receipt = await this.public.waitForTransactionReceipt({ hash, timeout: 60_000 });
-    writer.resolve(hash, receipt.blockNumber, receipt.status);
+    writer.resolve(hash, receipt.blockNumber, receipt.status, gasCost(receipt).gasCostWei);
     if (receipt.status !== 'success') throw new Refusal('financing_transaction_failed');
     return hash;
   }

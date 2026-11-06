@@ -21,8 +21,8 @@ export const paidPath = (merchantId: string) => `/x402/merchants/${merchantId}/$
 /**
  * Wires the existing x402 pieces for live mode: our facilitator settles real USDT through Permit2 on
  * the shared relayer journal, reservations go through the same writer, and every registered merchant
- * gets a paid endpoint behind the official @x402/hono middleware. The relayer pays settlement gas
- * (no merchant-tank reimbursement for x402 yet), within a per-merchant daily budget. The budget counts
+ * gets a paid endpoint behind the official @x402/hono middleware. Pact's relayer pays settlement gas
+ * and takes no fee on these micropayments, within a per-merchant daily budget. The budget counts
  * each call at its worst case (reservation and settlement gas at twice the gas price, about 0.008 WBT at
  * Whitechain's 5 gwei); actual spend is around a tenth of that.
  */

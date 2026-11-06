@@ -31,13 +31,8 @@ export interface DashboardSummary {
   };
   volume: Array<{ date: string; amount: string }>;
   recentActivity: DashboardActivity[];
-  gasTank: {
-    available: boolean;
-    balanceWei: string | null;
-    dailyCapWei: string | null;
-    spentTodayWei: string | null;
-    runwayDays: number | null;
-  };
+  /** Whether the merchant signed Pact's fee terms: until it does, Pact cannot take its payments. Null when unreadable. */
+  feeTerms: { accepted: boolean | null; acceptedVersion: number | null; latestVersion: number | null };
 }
 
 interface PaymentRow { captured_minor: string; refunded_minor: string; status: string; created_at: string }
@@ -120,10 +115,10 @@ function recentActivity(db: Db, merchantId: string): DashboardActivity[] {
   return activity.sort(newestFirst).slice(0, 10);
 }
 
-/** Confirmed accounting totals with independent current wallet and gas-tank RPC reads. */
+/** Confirmed accounting totals with independent current wallet and fee-terms RPC reads. */
 export async function getDashboardSummary(
   db: Db,
-  chain: Pick<ChainAdapter, 'gasTank' | 'merchantBalance'>,
+  chain: Pick<ChainAdapter, 'merchantFees' | 'merchantBalance'>,
   merchant: { merchantId: string; address: Address },
   clock: () => Date = () => new Date(),
 ): Promise<DashboardSummary> {
@@ -133,7 +128,7 @@ export async function getDashboardSummary(
   // A synchronous read transaction keeps all DB-derived fields on one SQLite snapshot.
   const snapshot = db.transaction(() => {
     const dates = new Map(Array.from({ length: 14 }, (_, index) => [new Date(midnight - (13 - index) * 86_400_000).toISOString().slice(0, 10), 0n]));
-    let captured = 0n, refunded = 0n, fees = 0n, todaySpend = 0n;
+    let captured = 0n, refunded = 0n, fees = 0n;
     let totalPayments = 0, successfulPayments = 0, authorizedPayments = 0;
     // SQLite SUM would coerce text amounts through bounded integers/floating point.
     const payments = db.prepare('SELECT captured_minor,refunded_minor,status,created_at FROM payments WHERE merchant_id=?').iterate(merchant.merchantId) as Iterable<PaymentRow>;
@@ -145,7 +140,7 @@ export async function getDashboardSummary(
     }
     let todayCaptured = 0n, todayRefunded = 0n, todayFees = 0n, refundCount = 0, subscriptionCharges = 0;
     const capturedPayments = new Set<string>();
-    const entries = db.prepare('SELECT kind,object_id,amount_minor,fee_minor,gas_wei,occurred_at FROM accounting_entries WHERE merchant_id=?').iterate(merchant.merchantId) as Iterable<{ kind: string; object_id: string; amount_minor: string; fee_minor: string; gas_wei: string; occurred_at: string }>;
+    const entries = db.prepare('SELECT kind,object_id,amount_minor,fee_minor,occurred_at FROM accounting_entries WHERE merchant_id=?').iterate(merchant.merchantId) as Iterable<{ kind: string; object_id: string; amount_minor: string; fee_minor: string; occurred_at: string }>;
     for (const entry of entries) {
       const day = utcDate(entry.occurred_at), amount = BigInt(entry.amount_minor);
       if (['Payment', 'Subscription'].includes(entry.kind)) {
@@ -154,9 +149,10 @@ export async function getDashboardSummary(
         if (day === today) { todayCaptured += amount; if (entry.kind === 'Payment') capturedPayments.add(entry.object_id); else subscriptionCharges++; }
       }
       if (entry.kind === 'Refund') refunded -= amount;
-      if (entry.kind === 'Fee') fees += BigInt(entry.fee_minor);
+      // Pact's fees: taken out of payments and renewals, and a refund's network fee.
+      fees += BigInt(entry.fee_minor);
       if (day === today && entry.kind === 'Refund') { todayRefunded -= amount; refundCount++; }
-      if (day === today && entry.kind === 'Fee') { todayFees += BigInt(entry.fee_minor); todaySpend += BigInt(entry.gas_wei); }
+      if (day === today) todayFees += BigInt(entry.fee_minor);
     }
     const { count: financedInvoices } = db.prepare("SELECT COUNT(*) AS count FROM invoices WHERE merchant_id=? AND (status='financed' OR financing_status='financed')").get(merchant.merchantId) as { count: number };
     const accountingComplete = (db.prepare('SELECT coverage_complete FROM accounting_state WHERE id=1').get() as { coverage_complete: number }).coverage_complete === 1;
@@ -167,11 +163,10 @@ export async function getDashboardSummary(
       recentActivity: recentActivity(db, merchant.merchantId),
       accountingComplete,
       today: { capturedUsdt: amountString(todayCaptured), refundedUsdt: amountString(todayRefunded), feesUsdt: amountString(todayFees), payments: capturedPayments.size, refunds: refundCount, subscriptionCharges },
-      todaySpend,
     };
   })();
 
-  let gasTank: DashboardSummary['gasTank'] = { available: false, balanceWei: null, dailyCapWei: null, spentTodayWei: null, runwayDays: null };
+  let feeTerms: DashboardSummary['feeTerms'] = { accepted: null, acceptedVersion: null, latestVersion: null };
   let balance: DashboardSummary['balance'] = { available: false, address: merchant.address, token: USDT, amountUsdt: null, blockNumber: null };
   // Independent deadlines preserve whichever RPC read succeeds. Late rejection
   // stays observed; neither an RPC failure nor sales totals imply a zero balance.
@@ -180,17 +175,11 @@ export async function getDashboardSummary(
     try { return await Promise.race([Promise.resolve().then(read), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Dashboard read timed out')), 2500); })]); }
     finally { if (timer !== undefined) clearTimeout(timer); }
   }
-  const [tankRead, balanceRead] = await Promise.allSettled([bounded(() => chain.gasTank(merchant.address)), bounded(() => chain.merchantBalance(merchant.address))]);
-  if (tankRead.status === 'fulfilled') {
-    const tank = tankRead.value;
-    // Only the display projection uses floating point; monetary totals and wei stay exact.
-    const projectedDays = snapshot.todaySpend > 0n ? Number(tank.balanceWei) / Number(snapshot.todaySpend) : null;
-    const runwayDays = projectedDays !== null && Number.isFinite(projectedDays) && (projectedDays > 0 || tank.balanceWei === 0n) ? projectedDays : null;
-    gasTank = { available: true, balanceWei: tank.balanceWei.toString(), dailyCapWei: tank.dailyCapWei.toString(), spentTodayWei: tank.spentTodayWei.toString(), runwayDays };
-  }
+  const [termsRead, balanceRead] = await Promise.allSettled([bounded(() => chain.merchantFees(merchant.address)), bounded(() => chain.merchantBalance(merchant.address))]);
+  if (termsRead.status === 'fulfilled') feeTerms = { accepted: termsRead.value.acceptedVersion !== 0, acceptedVersion: termsRead.value.acceptedVersion, latestVersion: termsRead.value.latestVersion };
   if (balanceRead.status === 'fulfilled') {
     const current = balanceRead.value;
     if (current.token.toLowerCase() === USDT.toLowerCase() && current.balanceMinor >= 0n) balance = { available: true, address: merchant.address, token: current.token, amountUsdt: amountString(current.balanceMinor), blockNumber: current.blockNumber.toString() };
   }
-  return { generatedAt, timeZone: 'UTC', accountingComplete: snapshot.accountingComplete, today: snapshot.today, balance, metrics: snapshot.metrics, volume: snapshot.volume, recentActivity: snapshot.recentActivity, gasTank };
+  return { generatedAt, timeZone: 'UTC', accountingComplete: snapshot.accountingComplete, today: snapshot.today, balance, metrics: snapshot.metrics, volume: snapshot.volume, recentActivity: snapshot.recentActivity, feeTerms };
 }

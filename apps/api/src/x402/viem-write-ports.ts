@@ -6,8 +6,7 @@ import { X402WriteRefusal, type MerchantSponsorshipPolicy, type X402Transaction,
 
 /** No key, wallet, RPC URL or nonce manager is accepted here. Root must pass the same
  * ViemChain instance used by every other relayer feature, and its writer to the coordinator.
- * Signs the exact supplied envelope without wrapping. Funded orchestration must explicitly
- * construct/authorize the Router envelope before this transport; transport alone reimburses nothing. */
+ * Signs the exact supplied envelope without wrapping; the transport authorizes nothing itself. */
 export class ViemX402WritePorts implements X402WritePorts {
   readonly writer;
   constructor(readonly chain: ViemChain) { this.writer = chain.writer; }
@@ -36,8 +35,7 @@ export class ViemX402WritePorts implements X402WritePorts {
   }
 }
 
-/** Explicit fail-closed production gate until a reviewed, funded M7 gateway exists.
- * A merchant balance preflight does not authorize this direct transport. */
-export const inactiveM7SponsorshipPolicy: MerchantSponsorshipPolicy = Object.freeze({
-  async authorize() { throw new X402WriteRefusal('m7_funded_gateway_required'); },
+/** Fail-closed default: refuses every settlement until a sponsorship policy is configured. */
+export const inactiveSponsorshipPolicy: MerchantSponsorshipPolicy = Object.freeze({
+  async authorize() { throw new X402WriteRefusal('x402_sponsorship_unconfigured'); },
 });

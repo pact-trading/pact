@@ -1,11 +1,9 @@
-import type { IntentRequest } from '../types.js';
 import type { Address, Hex } from 'viem';
 import type { AccountWriter, PreparedWrite } from '../account-writer.js';
 
 export interface X402Transaction { chainId: 1874; to: Address; data: Hex; value: 0n; gas: bigint }
 export interface SponsorshipRequest {
   operationId: string; kind: 'x402' | 'x402_reservation'; merchant: Address; payer: Address;
-  variant?: 'direct' | 'funded';
   amount: bigint; transaction: X402Transaction;
 }
 export interface SponsorshipGrant {
@@ -14,10 +12,9 @@ export interface SponsorshipGrant {
   merchantDailyLimitWei: bigint;
   merchantDailyCalls: number;
 }
-/** REQUIRED gate, with no default permissive implementation. Must refuse until root has approved
- * and integrated merchant sponsorship and actual M7 reimbursement. A balance read is NOT proof of
- * reimbursement. Bind authorization to this exact account/merchant/action/calldata/gas envelope.
- * SQLite limits below are conservative admission limits, not an onchain gas-tank implementation. */
+/** REQUIRED gate, with no default permissive implementation. Pact's relayer pays x402 settlement gas
+ * and nothing reimburses it, so the policy bounds that spend per merchant: bind authorization to this
+ * exact account/merchant/action/calldata/gas envelope. The SQLite limits are admission limits. */
 export interface MerchantSponsorshipPolicy { authorize(request: SponsorshipRequest): Promise<SponsorshipGrant> }
 export interface X402Receipt {
   txHash: Hex; block: bigint; status: 'success' | 'reverted';
@@ -32,7 +29,6 @@ export interface X402WritePorts {
   /** Real transport exposes its existing writer so coordinator construction can reject
    * accidentally creating a second queue, even for the same relayer address. */
   readonly writer?: AccountWriter;
-  simulateFunded?(request: IntentRequest, envelope: X402Transaction & { maxFeePerGas: bigint }): Promise<void>;
   chainId(): Promise<number>;
   transactionCount(): Promise<number>;
   prepare(request: X402Transaction & { maxFeePerGas: bigint }, nonce: number): Promise<PreparedWrite>;

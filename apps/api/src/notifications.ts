@@ -6,7 +6,7 @@ import { checkoutSettings } from './merchant-settings.js';
 import { Refusal } from './types.js';
 
 export type OwnerKind = 'merchant' | 'customer';
-export const MERCHANT_EVENTS = ['order.paid', 'payment.refunded', 'subscription.past_due', 'subscription.cancelled', 'invoice.paid', 'gas_tank.low_runway'];
+export const MERCHANT_EVENTS = ['order.paid', 'payment.refunded', 'subscription.past_due', 'subscription.cancelled', 'invoice.paid'];
 export const CUSTOMER_EVENTS = ['order.paid', 'payment.refunded', 'subscription.renewed', 'subscription.trial_will_end', 'subscription.past_due'];
 export const eventsFor = (kind: OwnerKind) => kind === 'merchant' ? MERCHANT_EVENTS : CUSTOMER_EVENTS;
 const EXPLORER = 'https://explorer.testnet.whitechain.io/tx/';
@@ -193,11 +193,6 @@ export function enqueueNotifications(db: Db, eventId: string, merchantId: string
   } catch (error) {
     console.error(`Notifications skipped for event ${eventId}:`, error instanceof Error ? error.message : 'unknown error');
   }
-}
-
-/** For alerts that are not webhook events. The same key on the same day queues one email. */
-export function queueMerchantAlert(db: Db, key: string, merchantId: string, type: string, mail: Mail) {
-  queueAll(db, key, type, 'merchant', merchantId, prefsFor(db, 'merchant', merchantId).email, mail);
 }
 
 export const retryAt = (at: Date, attempt: number) => new Date(at.getTime() + Math.min(3_600_000, 1000 * 2 ** (attempt - 1))).toISOString();

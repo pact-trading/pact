@@ -13,6 +13,7 @@ import { createX402AccountSigner } from './x402/account-client.js';
 import { NETWORK, USDT } from './x402/constants.js';
 import { PAID_ENDPOINT, paidPath, type LiveX402 } from './x402/live.js';
 import { ReservationPendingError } from './x402/sqlite-reservations.js';
+import { gasCost } from './approval-chain.js';
 
 const accountAbi = parseAbi([
   'function configureSessionWithSig(address key,uint256 perCall,uint256 daily,uint256 expiry,address[] merchants,uint256 deadline,bytes signature)',
@@ -23,6 +24,7 @@ const accountAbi = parseAbi([
   'function sessionKey() view returns (address)',
 ]);
 const factoryAbi = parseAbi(['function createAccount(address owner,bytes32 salt) returns (address)']);
+const MAX_AGENTS_PER_OWNER = 3;
 const reserveAbi = parseAbi([
   'function reserve((address spender,uint256 amount,uint256 nonce,uint256 deadline,address to,address facilitator,uint256 validAfter) payment,bytes signature) returns (bytes32)',
   'error Unauthorized()', 'error InvalidPolicy()', 'error SessionExpired()', 'error MerchantDenied()', 'error PerCallCap()', 'error DailyCap()', 'error InvalidWindow()', 'error AlreadyReserved()',
@@ -30,7 +32,7 @@ const reserveAbi = parseAbi([
 const erc20 = parseAbi(['function balanceOf(address) view returns (uint256)']);
 const MAX_APPROVAL = 100_000_000n;
 const json = (value: unknown) => JSON.parse(JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v.toString() : v)));
-const bad = (code: string, status: 400 | 403 | 404 | 409 = 400): never => { throw new IdentityError(code, status); };
+const bad = (code: string, status: 400 | 403 | 404 | 409 | 429 = 400): never => { throw new IdentityError(code, status); };
 
 type AgentRow = { id: string; owner: Address; name: string; description: string; account: Address; session_key: Address; session_secret: Hex; per_call_minor: string; daily_minor: string; expires_at: string; merchants: string; status: string; created_at: string };
 type Pending = { kind: 'create' | 'limits' | 'revoke'; owner: Address; payload: Record<string, unknown> };
@@ -72,7 +74,7 @@ export class AgentService {
       return prepared;
     }, raw => this.chain.broadcastTransaction(raw)), operation.id).catch(error => { this.chain.writer.notSent(operation.id); throw error; });
     const receipt = await this.pub.waitForTransactionReceipt({ hash, timeout: 60_000 });
-    this.chain.writer.resolve(hash, receipt.blockNumber, receipt.status);
+    this.chain.writer.resolve(hash, receipt.blockNumber, receipt.status, gasCost(receipt).gasCostWei);
     if (receipt.status !== 'success') throw new Refusal('agent_transaction_failed');
     return hash;
   }
@@ -100,8 +102,19 @@ export class AgentService {
     return { perCall, daily };
   }
 
+  /**
+   * Pact's relayer pays to deploy and configure an agent account (about 0.01 WBT), and nothing pays it
+   * back, so each owner may create at most three accounts, one a day.
+   */
+  private assertCanCreate(owner: Address) {
+    const rows = this.db.prepare('SELECT created_at FROM agents WHERE owner=?').all(owner.toLowerCase()) as Array<{ created_at: string }>;
+    if (rows.length >= MAX_AGENTS_PER_OWNER) bad('agent_limit', 409);
+    const dayAgo = Date.now() - 86_400_000;
+    if (rows.some(r => Date.parse(r.created_at) > dayAgo)) bad('agent_daily_limit', 429);
+  }
   /** Step 1 of creating an agent: the account address and the two messages the owner signs. */
   async createIntent(owner: Address, body: Record<string, unknown>) {
+    this.assertCanCreate(owner);
     const merchants = this.merchantsFor(body.merchantIds);
     const { perCall, daily } = this.limits(body);
     const salt = toHex(randomBytes(32));
@@ -117,6 +130,7 @@ export class AgentService {
     return json({ pendingId, account, typedData: [session, approval] });
   }
   async create(owner: Address, ownerUser: string, body: Record<string, unknown>) {
+    this.assertCanCreate(owner);
     const p = this.take(owner, 'create', body.pendingId);
     const signatures = body.signatures as Hex[] | undefined;
     if (!Array.isArray(signatures) || signatures.length !== 2) return bad('signatures_required');

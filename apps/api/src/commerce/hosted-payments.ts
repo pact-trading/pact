@@ -26,7 +26,8 @@ const json = (value: unknown) => JSON.parse(JSON.stringify(value, (_, v) => (typ
 
 /**
  * Payer routes for payments that are not product checkouts: invoices today. The payer owns the
- * payment once they start it; readiness, approval and the signed charge follow the checkout routes.
+ * payment once they start it; readiness, the USDT permit and the signed charge follow the checkout
+ * routes. Pact's fee comes out of the payment, at the invoice rate.
  */
 export function mountHostedPayments(app: Hono, s: HostedPaymentServices, payer: (c: Context) => Promise<VerifiedIdentity>) {
   const { db } = s;
@@ -111,10 +112,11 @@ export function mountHostedPayments(app: Hono, s: HostedPaymentServices, payer: 
     const amount = BigInt(String(p.amount_minor));
     const data = route
       ? encodeFunctionData({ abi: receivablesAbi, functionName: 'pay', args: [route.claimId, p.id as Hex, amount] })
-      : encodeFunctionData({ abi: escrowAbi, functionName: 'charge', args: [p.id as Hex, merchant, amount, BigInt(paymentRefundWindow(db, String(p.id))!)] });
+      // An invoice the merchant sent pays at the invoice rate; anything else at the checkout rate.
+      : encodeFunctionData({ abi: escrowAbi, functionName: invoiceId ? 'chargeInvoice' : 'charge', args: [p.id as Hex, merchant, amount, BigInt(paymentRefundWindow(db, String(p.id))!)] });
     if (route) s.financing!.checkPayment(route.claimId, amount, user.wallet.address as Address);
     const quote = await s.relayer.quote(route ? s.financing!.paymentGas(route.holders) : undefined);
-    const intent = { signer: user.wallet.address, merchant, target: route ? s.financing!.addresses.receivables : s.escrow, dataHash: keccak256(data), amount, feeUSDT: BigInt(quote.minimumFeeMinor), nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
+    const intent = { signer: user.wallet.address, merchant, target: route ? s.financing!.addresses.receivables : s.escrow, dataHash: keccak256(data), amount, nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
     // Remember how long this charge stays signable, so an abandoned attempt is released only after that.
     db.prepare('INSERT INTO hosted_intent_offers VALUES (?,?) ON CONFLICT(payment_id) DO UPDATE SET deadline=max(deadline,excluded.deadline)').run(p.id, Number(intent.deadline));
     return c.json(json({ data, intent, typedData: intentTypedData(intent, s.router) }));
@@ -131,7 +133,7 @@ export function mountHostedPayments(app: Hono, s: HostedPaymentServices, payer: 
     }
     if (String(i.target).toLowerCase() !== s.escrow.toLowerCase()) return bad('intent_mismatch');
     let call; try { call = decodeFunctionData({ abi: escrowAbi, data: b.data as Hex }); } catch { return bad('intent_mismatch'); }
-    if (call.functionName !== 'charge' || String(call.args?.[0]).toLowerCase() !== String(p.id).toLowerCase()) return bad('intent_mismatch');
+    if (!['charge', 'chargeInvoice'].includes(call.functionName) || String(call.args?.[0]).toLowerCase() !== String(p.id).toLowerCase()) return bad('intent_mismatch');
     return c.json(await s.submitIntent(b, { merchantId: String(p.merchant_id), address: merchantAddress(String(p.merchant_id)) }));
   });
 }

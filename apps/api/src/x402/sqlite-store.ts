@@ -30,14 +30,8 @@ export function initX402Store(db: Db) {
       write_id TEXT PRIMARY KEY REFERENCES relayer_operations(operation_id), merchant TEXT NOT NULL,
       day INTEGER NOT NULL, max_cost_wei TEXT NOT NULL, policy_json TEXT NOT NULL);
   `);
-  // Additive migration preserves all original direct-call identities and global nonce claims.
+  // Additive migration preserves all original direct-call identities and global nonce claims. Every operation is 'direct'.
   if (!(db.pragma('table_info(x402_operations)') as { name: string }[]).some(c => c.name === 'variant')) db.exec("ALTER TABLE x402_operations ADD COLUMN variant TEXT NOT NULL DEFAULT 'direct'");
-  db.exec(`CREATE TABLE IF NOT EXISTS x402_funded_operations (
-    operation_key TEXT PRIMARY KEY REFERENCES x402_operations(operation_key),
-    draft_json TEXT NOT NULL,draft_hash TEXT NOT NULL,state TEXT NOT NULL,
-    router TEXT,merchant TEXT,merchant_nonce TEXT,terms_json TEXT,
-    authorization_json TEXT,authorization_hash TEXT,envelope_json TEXT,envelope_hash TEXT,proof_json TEXT,
-    UNIQUE(router,merchant,merchant_nonce));`);
 }
 /** No TTL: absence/age cannot prove a broadcast was dropped. Deletion only forgets the upstream
  * retry hint. x402_operations + AccountWriter retain authoritative hash/nonce ownership forever. */
