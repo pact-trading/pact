@@ -128,7 +128,7 @@ describe('confirmed receipt reconciliation', () => {
     if (kind === 'refund') expect(f.row('refunds').status).toBe('succeeded');
     expect(f.db.prepare('SELECT * FROM chain_events').all()).toHaveLength(2);
     expect(f.db.prepare("SELECT fee_minor FROM accounting_entries WHERE kind='Fee'").all()).toEqual(kind === 'refund' ? [{ fee_minor: '20000' }] : []);
-    expect(f.db.prepare('SELECT * FROM webhook_events').all()).toHaveLength(1);
+    expect(f.db.prepare("SELECT * FROM webhook_events WHERE type NOT IN ('payment.confirmed','payment.finalized')").all()).toHaveLength(1);
   });
   it.each(['renew', 'subscribe'] as const)('settles a confirmed %s only from its matching event', async kind => {
     const f = fixture(kind);
@@ -277,7 +277,7 @@ describe('receipt adapters', () => {
     expect(await adapter.receipt(hash)).toEqual({ txHash: hash, block: 10n, status: 'reverted', events: [] });
     // A reverted transaction still cost the relayer its gas: the receipt reports it.
     getTransactionReceipt.mockResolvedValue({ transactionHash: hash, blockNumber: 10n, status: 'reverted', logs: [], gasUsed: 50_000n, effectiveGasPrice: 5_000_000_000n });
-    expect(await adapter.receipt(hash)).toEqual({ txHash: hash, block: 10n, status: 'reverted', events: [], gasCostWei: 250_000_000_000_000n });
+    expect(await adapter.receipt(hash)).toEqual({ txHash: hash, block: 10n, status: 'reverted', events: [], gasCostWei: 250_000_000_000_000n, gasUsed: 50_000n });
   });
   it('models unknown, failed and successful fake receipts without inventing failure', async () => {
     const chain = new FakeChain();

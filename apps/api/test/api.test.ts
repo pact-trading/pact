@@ -209,10 +209,12 @@ describe('Settle API', () => {
       expect(options?.headers && (options.headers as Record<string, string>)['x-settle-signature']).toBe(signWebhook(String(options?.body), 'whsec_test'));
       return new Response('', { status: attempts === 1 ? 503 : 200 });
     };
-    expect(await deliverWebhooks(f.db, fetcher as typeof fetch)).toBe(1);
+    // One payment: payment.confirmed, payment.captured and (final at once on this chain) payment.finalized.
+    expect(f.db.prepare('SELECT type FROM webhook_events ORDER BY rowid').all()).toEqual([{ type: 'payment.confirmed' }, { type: 'payment.captured' }, { type: 'payment.finalized' }]);
+    expect(await deliverWebhooks(f.db, fetcher as typeof fetch)).toBe(3);
     expect(await deliverWebhooks(f.db, fetcher as typeof fetch, new Date(Date.now() + 2000))).toBe(1);
     const deliveries = await (await f.get('/v1/webhooks/deliveries')).json() as { data: Array<{ status: string }> };
-    expect(deliveries.data[0].status).toBe('delivered');
+    expect(deliveries.data.every(d => d.status === 'delivered')).toBe(true);
     const events = await (await f.get('/v1/webhooks/events')).json() as { data: Array<{ id: string }> };
     expect((await f.post(`/v1/webhooks/events/${events.data[0].id}/replay`, {})).status).toBe(200);
   });

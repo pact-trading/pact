@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { privateKeyToAccount } from 'viem/accounts';
 import { encodeFunctionData, keccak256, parseTransaction, type Hex } from 'viem';
 import { FakeChain, escrowAbi, ViemChain } from '../src/chain.js';
-import { Relayer, allowedTargets, transactionGas } from '../src/relayer.js';
+import { Relayer, allowedTargets, routerGasPrior, transactionGas } from '../src/relayer.js';
 import { intentTypedData } from '../src/typed-data.js';
 import type { IntentRequest } from '../src/types.js';
 const key = `0x${'1'.repeat(64)}` as Hex;
@@ -28,9 +28,10 @@ describe('Router transaction gas', () => {
     expect(chain.sent[0].gas).toBeGreaterThan(480_000n);
     expect(simulation.mock.calls[0]).toEqual([chain.sent[0].request, { gas: chain.sent[0].gas, gasPrice: chain.price }]);
   });
-  it('accounts for full transaction gas in the minute budget', async () => {
-    const { chain, relayer } = fixture(500_000n * 1_000_000_000n);
-    await expect(relayer.submit(await request())).rejects.toMatchObject({ code: 'circuit_budget' });
+  it('accounts for the whole target allowance plus Router overhead in the minute budget', async () => {
+    const value = await request();
+    const { chain, relayer } = fixture((routerGasPrior(value, transactionGas(value)) - 1n) * 1_000_000_000n);
+    await expect(relayer.submit(value)).rejects.toMatchObject({ code: 'circuit_budget' });
     expect(chain.sent).toHaveLength(0);
   });
   it('permits target gas at its limit plus bounded Router overhead', async () => {
@@ -67,10 +68,12 @@ describe('Viem exact transaction simulation', () => {
     Object.assign(adapter, { public: { simulateContract, estimateContractGas }, wallet: { writeContract } });
     const value = await request();
     const transaction = { gas: 660_000n, gasPrice: 5_001_000_000n };
+    // EIP-1559: a fee cap of twice the gas price (headroom against a rising base fee) and the tip.
+    const fees = { maxFeePerGas: 10_002_000_000n, maxPriorityFeePerGas: 1_000_000n };
     expect(await adapter.simulate(value, transaction)).toMatchObject({ accepted: true, gas: transaction.gas });
     const prepared = await adapter.prepareIntent(value, transaction.gas, 7, transaction.gasPrice);
-    expect(simulateContract).toHaveBeenCalledWith(expect.objectContaining(transaction));
-    expect(parseTransaction(prepared.raw)).toMatchObject({ ...transaction, nonce: 7 });
+    expect(simulateContract).toHaveBeenCalledWith(expect.objectContaining({ gas: transaction.gas, ...fees }));
+    expect(parseTransaction(prepared.raw)).toMatchObject({ type: 'eip1559', gas: transaction.gas, ...fees, nonce: 7 });
     expect(writeContract).not.toHaveBeenCalled();
     expect(estimateContractGas).not.toHaveBeenCalled();
     simulateContract.mockResolvedValueOnce({ result: [false, '0x'] });
@@ -78,19 +81,24 @@ describe('Viem exact transaction simulation', () => {
     simulateContract.mockRejectedValueOnce(new Error('out of gas'));
     expect(await adapter.simulate(value, transaction)).toMatchObject({ accepted: false, reason: 'out of gas' });
   });
-  it('blocks retries after an ambiguous broadcast', async () => {
+  it('refuses a retry of an ambiguous broadcast, but not other payments, which take the next nonce', async () => {
     const { chain, relayer } = fixture();
     vi.spyOn(chain, 'broadcastTransaction').mockRejectedValueOnce(new Error('RPC rejected'));
     const value = await request();
-    expect(await relayer.submit(value)).toMatch(/^0x/);
-    await expect(relayer.submit(value)).rejects.toMatchObject({ code: 'relayer_pending' });
+    const hash = await relayer.submit(value);
+    expect(hash).toMatch(/^0x/);
+    await expect(relayer.submit(value)).rejects.toMatchObject({ code: 'replay' });
     expect(chain.sent).toHaveLength(0);
+    await relayer.submit(await request(2n));
+    expect(chain.sent.map(s => [s.request.intent.nonce, s.nonce])).toEqual([[2n, 1]]);
+    // The ambiguous one keeps nonce 0 and its exact signed bytes, which the watchdog resends.
+    expect(chain.writer.unsettled().map(r => [r.nonce, r.tx_hash, r.phase])[0]).toEqual([0, hash, 'uncertain']);
   });
-  it('checks that the fee covers the whole transaction gas, Router overhead included, not just the target', async () => {
+  it('checks that the fee covers the whole target allowance and Router overhead, not just the target', async () => {
     const { chain, relayer } = fixture();
     const value = await request();
-    // A WBT price at which the 0.15 USDT fee covers the 400,000 target gas, but not the full transaction.
-    const gas = transactionGas(value), usdtPerWbt = 130_000n * 10n ** 9n / gas;
+    // A WBT price at which the 0.15 USDT fee covers the 400,000 target gas, but not with the Router overhead.
+    const gas = routerGasPrior(value, transactionGas(value)), usdtPerWbt = 130_000n * 10n ** 9n / gas;
     expect(400_000n * usdtPerWbt * chain.price / 10n ** 18n * 12n).toBeLessThan(150_000n * 10n);
     chain.policy.usdtPerWbt = usdtPerWbt;
     await expect(relayer.submit(value)).rejects.toMatchObject({ code: 'fee_below_gas' });
@@ -125,7 +133,7 @@ describe('per-merchant sponsorship limits', () => {
   });
   it('caps one merchant per minute below the global ceiling', async () => {
     const first = await requestFor(merchants.a, 1n);
-    const oneCall = transactionGas(first) * new FakeChain().price;
+    const oneCall = routerGasPrior(first, transactionGas(first)) * new FakeChain().price;
     const { chain, relayer } = twoMerchants({ maxSpendPerMerchantPerMinute: oneCall + oneCall / 2n });
     await relayer.submit(first);
     await expect(relayer.submit(await requestFor(merchants.a, 2n))).rejects.toMatchObject({ code: 'merchant_circuit_budget' });

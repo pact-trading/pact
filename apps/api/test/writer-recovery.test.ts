@@ -125,7 +125,10 @@ describe.each(kinds)('%s durable broadcast recovery', kind => {
     const hash = (await result.json()).txHash as Hex; expect(hash).toBe(f.chain.writer.rows()[0].tx_hash);
     expect(f.chain.writer.rows()[0].phase).toBe('uncertain');
     const recovered = restart(snapshot!);
-    await expect(recovered.chain.renew(keccak256(toHex('unrelated')), 1n)).rejects.toMatchObject({ code: 'relayer_pending' });
+    // The interrupted broadcast kept its signed bytes: an unrelated write proceeds at the next nonce.
+    expect(recovered.chain.writer.unsettled().map(r => [r.nonce, r.tx_hash])).toEqual([[0, hash]]);
+    await recovered.chain.renew(keccak256(toHex('unrelated')), 1n);
+    expect(recovered.chain.writer.rows().map(r => r.nonce)).toEqual([0, 1]);
     recovered.chain.block = 12n;
     recovered.chain.receipts.set(hash, null); await new Indexer(recovered.db, recovered.chain, 13n).poll();
     expect(recovered.chain.writer.rows()[0].phase).toBe('broadcasting');
@@ -141,8 +144,8 @@ describe.each(kinds)('%s durable broadcast recovery', kind => {
     if (kind === 'cancel') expect(recovered.db.prepare('SELECT status,pending_tx_hash FROM subscriptions').get()).toEqual({ status: 'cancelled', pending_tx_hash: null });
     if (['renew', 'subscribe'].includes(kind)) expect(recovered.db.prepare('SELECT status,pending_tx_hash FROM subscriptions').get()).toEqual({ status: 'active', pending_tx_hash: null });
     // Fresh process has pending count zero: retained confirmed nonce wins.
-    await recovered.chain.renew(keccak256(toHex('unrelated')), 1n);
-    expect(recovered.chain.writer.rows().map(r => r.nonce)).toEqual([0, 1]);
+    await recovered.chain.renew(keccak256(toHex('another')), 1n);
+    expect(recovered.chain.writer.rows().map(r => r.nonce)).toEqual([0, 1, 2]);
     expect(recovered.chain.sent).toHaveLength(0); // Original operation was not resent.
   });
   it('keeps returned-but-unconfirmed identity through restart with a stale pending count', async () => {

@@ -86,7 +86,8 @@ describe('commerce price, ownership and confirmed order contracts', () => {
     expect(f.db.prepare("SELECT * FROM webhook_events WHERE type='order.refunded'").all()).toHaveLength(2);
   });
   it('uses the same durable relayer for an owner-signed charge and refund, with exact retry and confirmed totals', async () => {
-    const f = fixture(true), p = await f.createProduct(), checkout = await (await f.buy(p.id)).json();
+    const f = fixture(true); f.chain.collectorEnabled = false; // the Router intent path
+    const p = await f.createProduct(), checkout = await (await f.buy(p.id)).json();
     const base = `/checkout-sessions/${checkout.session.id}`;
     const prepareResponse = await f.req(`${base}/intent`, 'payer'); expect(prepareResponse.status).toBe(200);
     const prepared = await prepareResponse.json();

@@ -17,6 +17,8 @@ export const subscription: Address = '0x0000000000000000000000000000000000000003
 export function apiFixture(autoSettle = true, approvalEnabled = false, merchantAddress: Address = signer.address) {
   const db = openDb();
   const chain = new FakeChain(autoSettle);
+  // The SDK suites exercise the USDT permit + Router intent path; one-signature checkout has its own tests.
+  chain.collectorEnabled = false;
   // The merchant signed Pact's fee terms; with approvals off, its wallet holds USDT and allows every spender.
   chain.accepted.set(merchantAddress.toLowerCase(), 1);
   if (!approvalEnabled) chain.approval.state = { balance: 100_000_000n, allowance: 2n ** 256n - 1n, nonce: 0n };

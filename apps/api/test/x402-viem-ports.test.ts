@@ -16,11 +16,16 @@ async function fixture() {
   const calls: string[] = [];
   const server = createServer(async (req, res) => {
     let input = ''; for await (const part of req) input += part;
-    const { id, method } = JSON.parse(input); calls.push(method);
-    const result = method === 'eth_chainId' ? toHex(chainId) : method === 'eth_getTransactionCount' ? '0x7'
-      : method === 'eth_blockNumber' ? '0x21' : method === 'eth_getTransactionReceipt' ? null
-      : method === 'eth_call' ? `0x1626ba7e${'0'.repeat(56)}` : null;
-    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ jsonrpc: '2.0', id, result }));
+    // JSON-RPC 2.0, single or batched (as real nodes, and the viem client, use them).
+    const answer = ({ id, method }: { id: number; method: string }) => {
+      calls.push(method);
+      const result = method === 'eth_chainId' ? toHex(chainId) : method === 'eth_getTransactionCount' ? '0x7'
+        : method === 'eth_blockNumber' ? '0x21' : method === 'eth_getTransactionReceipt' ? null
+        : method === 'eth_call' ? `0x1626ba7e${'0'.repeat(56)}` : null;
+      return { jsonrpc: '2.0', id, result };
+    };
+    const request = JSON.parse(input);
+    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(Array.isArray(request) ? request.map(answer) : answer(request)));
   });
   servers.push(server); await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
   const chain = new ViemChain(`http://127.0.0.1:${(server.address() as { port: number }).port}`, toHex(0x402a11cen, { size: 32 }), { router: EXACT, escrow: EXACT, fees: EXACT, subscription: EXACT });

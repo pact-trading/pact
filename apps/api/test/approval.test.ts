@@ -17,7 +17,8 @@ const router = '0x0000000000000000000000000000000000000001';
 const escrow = '0x0000000000000000000000000000000000000002' as const;
 const subscription = '0x0000000000000000000000000000000000000003';
 function fixture(config: Partial<ApprovalConfig> = {}) {
-  const db = openDb(); const chain = new FakeChain(); const keys = seedMerchant(db, payer.address);
+  // These tests cover the USDT permit path (mainnet USDT, financed invoices, subscriptions): no one-signature checkout.
+  const db = openDb(); const chain = new FakeChain(); chain.collectorEnabled = false; const keys = seedMerchant(db, payer.address);
   chain.accepted.set(payer.address.toLowerCase(), 1);
   const relayer = new Relayer(chain, router, allowedTargets({ escrow, subscription }));
   const approval = new ApprovalService(db, chain, { enabled: true, escrow, minimumAmount: 1_000_000n, ...config });
@@ -239,14 +240,16 @@ describe('approval receipt and uncertain send reconciliation', () => {
     await f.post(path(a.id), a.b); expect(f.chain.approval.broadcasts).toHaveLength(1);
     await expect(f.chain.renew(`0x${'a'.repeat(64)}`, 1n)).resolves.toBeDefined();
   });
-  it('persists ambiguous broadcast hash across restart and blocks all relayer writers', async () => {
+  it('persists ambiguous broadcast hash and its signed bytes across restart without holding other writers', async () => {
     const f = fixture(); vi.spyOn(f.chain.approval, 'broadcast').mockRejectedValue(new Error('timeout after acceptance'));
     const a = await start(f); expect(await read(f, a.id)).toMatchObject({ status: 'pending', reason: 'broadcast_uncertain', txHash: a.hash });
-    const restarted = new FakeChain();
+    const restarted = new FakeChain(); restarted.collectorEnabled = false;
     const approval = new ApprovalService(f.db, restarted, { enabled: true, escrow, minimumAmount: 1_000_000n });
     expect(await approval.get(a.id, f.keys.merchantId, payer.address)).toMatchObject({ status: 'pending' });
-    await expect(restarted.renew(`0x${'a'.repeat(64)}`, 1n)).rejects.toMatchObject({ code: 'relayer_pending' });
-    await expect(f.relayer.submit(await signedCharge(a.id))).rejects.toMatchObject({ code: 'relayer_pending' });
+    // The ambiguous permit keeps nonce 0 and its exact bytes for the watchdog; later writes take later nonces.
+    expect(restarted.writer.unsettled().map(r => [r.kind, r.nonce, r.tx_hash])).toEqual([['approval', 0, a.hash]]);
+    await expect(restarted.renew(`0x${'a'.repeat(64)}`, 1n)).resolves.toBeDefined();
+    expect(restarted.writer.rows().map(r => r.nonce)).toEqual([0, 1]);
     settled(f, a.hash); await read(f, a.id);
     expect(f.db.prepare('SELECT * FROM relayer_write_block').all()).toEqual([]);
     expect(f.chain.approval.prepared).toHaveLength(1);
@@ -339,8 +342,9 @@ describe('Viem approval adapter evidence', () => {
 });
 
 describe('keeper shared-account holds', () => {
-  it('leaves subscriptions unchanged while an approval is unresolved', async () => {
+  it('leaves subscriptions unchanged while the relayer account is stuck behind an unbroadcastable nonce', async () => {
     const f = fixture(); vi.spyOn(f.chain.approval, 'broadcast').mockRejectedValue(new Error('timeout')); await start(f);
+    f.chain.writer.stuck = 'nonce 0 cannot be broadcast: insufficient funds';
     f.db.prepare('INSERT INTO plans(id,merchant_id,name,amount_minor,period_seconds,max_periods,created_at) VALUES (?,?,?,?,?,?,?)').run('plan_hold', f.keys.merchantId, 'Plan', '2000000', 86400, 12, new Date().toISOString());
     f.db.prepare('INSERT INTO subscriptions(id,merchant_id,plan_id,chain_id,payer,status,next_charge_at,retry_count,pending_tx_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('sub_hold', f.keys.merchantId, 'plan_hold', `0x${'a'.repeat(64)}`, payer.address, 'active', new Date(0).toISOString(), 0, null, new Date().toISOString());
     await runKeeper(f.db, f.chain); await runKeeper(f.db, f.chain);
@@ -365,12 +369,13 @@ describe('approval journal restart boundaries', () => {
     const broadcast = f.chain.approval.broadcast.bind(f.chain.approval);
     vi.spyOn(f.chain.approval, 'broadcast').mockImplementation(async raw => { if (phase === 'broadcasting') snapshot = f.db.serialize(); return broadcast(raw); });
     const a = await start(f);
-    const db = new Database(snapshot!); const chain = new FakeChain();
+    const db = new Database(snapshot!); const chain = new FakeChain(); chain.collectorEnabled = false;
     const approval = new ApprovalService(db, chain, { enabled: true, escrow, minimumAmount: 1_000_000n });
     try {
       if (phase === 'broadcasting') {
         expect(await approval.get(a.id, f.keys.merchantId, payer.address)).toMatchObject({ status: 'pending', txHash: a.hash });
-        await expect(chain.renew(`0x${'a'.repeat(64)}`, 1n)).rejects.toMatchObject({ code: 'relayer_pending' });
+        // Interrupted mid-broadcast, with its signed bytes journaled: other writes proceed at the next nonce.
+        await expect(chain.renew(`0x${'a'.repeat(64)}`, 1n)).resolves.toBeDefined();
         chain.block = 12n; chain.approval.receipts.set(a.hash, { hash: a.hash, block: 10n, status: 'success', approvals: [] });
         expect(await approval.get(a.id, f.keys.merchantId, payer.address)).toMatchObject({ status: 'unavailable', reason: 'missing_approval_event' });
         expect(chain.writer.rows()[0].phase).toBe('confirmed');
