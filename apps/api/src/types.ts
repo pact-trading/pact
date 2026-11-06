@@ -8,22 +8,21 @@ export interface Intent {
   target: Address;
   dataHash: Hex;
   amount: bigint;
-  feeUSDT: bigint;
   nonce: bigint;
   deadline: bigint;
   maxGas: number;
 }
 export interface IntentRequest { intent: Intent; signature: Hex; data: Hex }
 export interface Mandate { payer: Address; merchant: Address; planId: Hex; amountCap: bigint; periodSeconds: bigint; maxPeriods: number; endTime: bigint; nonce: bigint }
-export interface MerchantConsent { deadline: bigint; signature: Hex }
 export interface ChainEvent {
   id: string;
   block: bigint;
   txHash: Hex;
-  contract: 'escrow' | 'subscription' | 'router' | 'gasTank' | 'receivables';
+  contract: 'escrow' | 'subscription' | 'router' | 'receivables';
   name: string;
   args: Record<string, string | bigint | number>;
   timestamp?: string;
+  /** Where the FeeSchedule sent fees at this event's block: Pact's relayer, later a fee vault. */
   feeRecipient?: Address;
   /** Escrow state read at this event's block; not an invented event argument. */
   paymentTerms?: { refundWindowSeconds: string; refundDeadlineUnix: string };
@@ -34,13 +33,31 @@ export interface ChainReceipt {
   status: 'success' | 'reverted';
   // Only decoded events from the configured suite, never arbitrary log emitters.
   events: ChainEvent[];
+  /** What the transaction cost its sender in WBT wei (gas used times the effective price), when known. */
+  gasCostWei?: bigint;
 }
 export interface TransactionGas { gas: bigint; gasPrice: bigint }
 export interface Simulation { accepted: boolean; reason?: string; gas: bigint }
+/** Router limits, plus the FeeSchedule's WBT price that converts gas to USDT. */
 export interface RouterPolicy { blockNumber: bigint; usdtPerWbt: bigint; maxGasPerCall: bigint; maxGasPriceWei: bigint; minimumAmountMinor: bigint; maxPayerCallsPerDay?: number }
 export interface MerchantBalance { token: Address; blockNumber: bigint; balanceMinor: bigint }
+/** One product's rate in the FeeSchedule: `bps` of the amount, at least `minFeeMinor`, at most `maxFeeMinor` (0: no cap). */
+export interface FeeRate { bps: number; minFeeMinor: bigint; maxFeeMinor: bigint }
+export interface FeeTerms { checkout: FeeRate; invoice: FeeRate }
+/** A merchant's position in the FeeSchedule. */
+export interface MerchantFees {
+  /** The version the merchant signed, or 0: until it signs, Pact cannot take its payments. */
+  acceptedVersion: number;
+  latestVersion: number;
+  accepted: FeeTerms | null;
+  latest: FeeTerms;
+  /** Where fees go. */
+  recipient: Address;
+  usdtPerWbt: bigint;
+  /** The merchant's acceptance-signature nonce. */
+  nonce: bigint;
+}
 export interface ChainAdapter {
-  readonly subscriptionVersion: 1 | 2;
   writer: AccountWriter;
   approval: ApprovalChain;
   chainId(): Promise<number>;
@@ -55,9 +72,15 @@ export interface ChainAdapter {
   gasPrice(): Promise<bigint>;
   routerPolicy(): Promise<RouterPolicy>;
   merchantBalance(merchant: Address): Promise<MerchantBalance>;
-  gasTank(merchant: Address): Promise<{ balanceWei: bigint; dailyCapWei: bigint; spentTodayWei: bigint }>;
+  merchantFees(merchant: Address): Promise<MerchantFees>;
+  /**
+   * A direct write from Pact's relayer (not through the Router): permits, fee-terms acceptance and
+   * signed financing orders. Simulated first, so a call that would revert is refused before it costs
+   * gas; journaled and budgeted like every other relayer write.
+   */
+  relay(operation: WriteOperation, to: Address, data: Hex, gas: bigint): Promise<Hex>;
   renew(subscriptionId: Hex, amount: bigint, operation?: WriteOperation): Promise<Hex>;
-  subscribe(mandate: Mandate, signature: Hex, operation?: WriteOperation, consent?: MerchantConsent): Promise<Hex>;
+  subscribe(mandate: Mandate, signature: Hex, operation?: WriteOperation): Promise<Hex>;
   cancelSigned(subscriptionId: Hex, deadline: bigint, signature: Hex, operation?: WriteOperation): Promise<Hex>;
   mandateNonce(payer: Address): Promise<bigint>;
 }
