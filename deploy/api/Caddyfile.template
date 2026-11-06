@@ -1,0 +1,11 @@
+# Written by provision.sh. Caddy obtains and renews the TLS certificate for the API domain.
+{API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3001
+	header -Server
+	# Access log to the journal (journalctl -u caddy): method, path, status and duration per request.
+	log {
+		output stdout
+		format json
+	}
+}

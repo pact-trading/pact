@@ -1,0 +1,33 @@
+[Unit]
+Description=Pact Pay API (relayer, keeper, indexer, webhooks, x402 facilitator)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pact
+Group=pact
+WorkingDirectory=/opt/pact-pay/apps/api
+EnvironmentFile=/etc/pact-api/api.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/node --import tsx src/server.ts
+Restart=on-failure
+RestartSec=5
+# The API keeps relayer ownership until exit and lets in-flight writes drain (its own limit is 10 s).
+KillSignal=SIGTERM
+TimeoutStopSec=20
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/pact-api
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

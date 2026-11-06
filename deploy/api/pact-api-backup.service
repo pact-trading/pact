@@ -1,0 +1,13 @@
+[Unit]
+Description=Pact Pay API database backup (SQLite online backup, 14 days kept)
+
+[Service]
+Type=oneshot
+User=pact
+Group=pact
+ExecStart=/bin/sh -c 'sqlite3 /var/lib/pact-api/api.sqlite ".backup /var/lib/pact-api/backups/api-$(date -u +%%Y%%m%%dT%%H%%M).sqlite" && find /var/lib/pact-api/backups -name "api-*.sqlite" -mtime +14 -delete'
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/pact-api
