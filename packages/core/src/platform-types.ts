@@ -1,11 +1,10 @@
 /**
- * Response shapes for flows the web app shows but the API does not expose yet.
- * They extend the existing API types so a real
+ * Response shapes for flows the web app shows but the API does not expose yet
+ * (see docs/wiring-backlog.md). They extend the existing API types so a real
  * endpoint can return them without changing the UI.
  */
 import type { Address, Hex } from 'viem';
 import type {
-  GasTank,
   Invoice,
   RefusalAttempt,
   Subscription,
@@ -29,7 +28,7 @@ export interface Viewer {
 
 export type RefusalSource = 'refund' | 'subscription' | 'sponsorship' | 'agent' | 'invoice';
 
-/** A refused action. Refusals never spend the merchant's gas. */
+/** A refused action. A refusal moves none of the merchant's money and costs it nothing. */
 export interface RefusalEvent extends RefusalAttempt {
   source: RefusalSource;
   /** The drain-protection layer (1-8) that refused it, when it was a sponsorship refusal. */
@@ -37,53 +36,6 @@ export interface RefusalEvent extends RefusalAttempt {
   /** Plain-language explanation shown to merchants and customers. */
   detail: string;
   actor: string | null;
-}
-
-// --------------------------------------------------------------------- gas
-
-export type SponsoredAction =
-  | 'payment'
-  | 'refund'
-  | 'subscribe'
-  | 'renewal'
-  | 'cancel'
-  | 'invoice_acknowledge'
-  | 'account_setup'
-  | 'agent_settlement';
-
-export interface GasLedgerEntry {
-  id: string;
-  createdAt: string;
-  action: SponsoredAction;
-  objectId: string;
-  /** Customer-facing label of what was sponsored. */
-  label: string;
-  gasWei: string;
-  /** USD estimate of the gas, in USDT base units. */
-  gasUsdMinor: string;
-  /** Pact fee collected in the same transaction, in USDT base units. */
-  feeMinor: string;
-  txHash: Hex;
-}
-
-export interface GasPolicy {
-  /** Who carries gas: the merchant's tank, or a surcharge added to the price. */
-  mode: 'absorb' | 'surcharge';
-  surchargeMinor: string;
-  perPayerDailyActions: number;
-  minimumAmountMinor: string;
-  maxGasPerCall: number;
-  maxFeePerGasWei: string;
-  lowRunwayAlertDays: number;
-}
-
-export interface GasTankDetail extends GasTank {
-  policy: GasPolicy;
-  /** Price used for USD estimates: USDT base units per 1 WBT. */
-  wbtUsdMinor: string;
-  faucet: { amountWei: string; nextClaimAt: string | null; source: string };
-  /** Sponsored spend per UTC day, oldest first. */
-  history: Array<{ date: string; spentWei: string; actions: number }>;
 }
 
 // ---------------------------------------------------------------- security
@@ -101,8 +53,8 @@ export type DrainAttack =
   | 'replay'
   | 'dust'
   | 'arbitrary_calldata'
-  | 'spam_accounts'
-  | 'over_daily_cap'
+  | 'spend_merchant_funds'
+  | 'over_gas_cap'
   | 'stale_deadline';
 
 export interface DrainAttempt {
@@ -120,8 +72,9 @@ export interface DrainRun {
   startedAt: string;
   attempts: DrainAttempt[];
   legitimateSent: number;
-  tankBeforeWei: string;
-  tankAfterWei: string;
+  /** The merchant's USDT balance, in base units, before and after the run. Null when it could not be read. */
+  merchantBalanceBeforeMinor: string | null;
+  merchantBalanceAfterMinor: string | null;
 }
 
 // ------------------------------------------------------------------ agents
@@ -308,7 +261,7 @@ export interface CustomerAccount {
 // ------------------------------------------------------------ onboarding
 
 export interface OnboardingStep {
-  id: 'account' | 'brand' | 'gas' | 'integrate' | 'test_payment';
+  id: 'account' | 'brand' | 'fees' | 'integrate' | 'test_payment';
   title: string;
   done: boolean;
 }

@@ -1,4 +1,4 @@
-import type { Address, Hex, SignedAuthorization } from 'viem';
+import type { Address, Hex } from 'viem';
 import type { Intent, Mandate } from './typed-data.js';
 
 export interface ListResponse<T> { data: T[] }
@@ -12,14 +12,22 @@ export type MerchantSettingsUpdate = Partial<CheckoutSettings>;
 export interface MerchantSettings extends CheckoutSettings {
   payoutAddress: Address; payoutMode: 'merchant_wallet'; webhook: { url: string | null; configured: boolean };
 }
+/**
+ * Read-only gas quote. Pact's fee comes out of each payment (see FeesDetail); this only says what the
+ * network fee of a merchant-paid call (a refund, a buy-back) can cost at most, in USDT.
+ */
 export interface FeePreview {
   chainId: number; blockNumber: string; targetGas: number; gasPriceWei: string;
-  usdtPerWbtMinor: string; maximumReimbursementWei: string; minimumFeeMinor: string; minimumAmountMinor: string;
+  /** USDT base units per 1 WBT, as the FeeSchedule converts gas. */
+  usdtPerWbtMinor: string;
+  /** The most a merchant-paid call of `targetGas` can cost in USDT base units. */
+  maximumGasFeeMinor: string;
+  minimumAmountMinor: string;
 }
 export interface ApiConfig {
   chainId: number; merchant: Address; router: Address; escrow: Address; subscription: Address;
-  /** Absent on older APIs; never infer V2 from an address. */
-  subscriptionVersion?: 1 | 2;
+  /** The FeeSchedule the merchant signs its fee terms with. */
+  fees: Address;
   checkout?: CheckoutSettings;
 }
 export type PaymentStatus = 'pending' | 'succeeded' | 'failed' | 'refunded';
@@ -106,22 +114,27 @@ export interface FinancingOverview {
   totals: Record<FinancingStatus, { count: number; faceMinor: string }>;
   advancedMinor: string; reserveHeldMinor: string; forwardedMinor: string; buyBackOwedMinor: string; ineligibleCount: number;
 }
-/** Transactions the merchant's own wallet sends, in order; then pass their hashes to `submitTransactions`. */
-export interface PreparedFinancingTransactions {
+/**
+ * EIP-712 messages the merchant signs, in order (any USDT permits first), and the order to send back
+ * with the signatures to the matching relay method. Pact's relayer submits it: the merchant needs no WBT.
+ */
+export interface PreparedFinancingSignature {
   title: string;
   lines: Array<{ label: string; value: string }>;
-  transactions: Array<{ to: Address; data: Hex; label: string }>;
+  typedData: Array<Record<string, unknown>>;
+  order: Record<string, string>;
 }
+/** The prepared order and the signatures of its typedData, in the same order. */
+export interface SignedFinancingOrder { order: Record<string, string>; signatures: Hex[] }
 
 export interface SubscriptionPlanRequest { name: string; amount: string; periodSeconds: number; maxPeriods?: number; trialDays?: number }
 export interface SubscriptionPlan { trialDays?: number; id: string; name: string; amount: string; periodSeconds: number; maxPeriods: number | null }
-/** V1 payer mandate only; use SubscriptionV2Request for V2 registration. */
-export interface SubscriptionRequest { planId: string; mandate: Mandate; signature: Hex }
-/** Merchant signature over SponsorshipConsent with the full V2 mandate digest. */
-export interface MerchantConsentV2 { deadline: bigint; signature: Hex }
-export interface SubscriptionV2Request extends SubscriptionRequest { merchantConsent: MerchantConsentV2 }
-/** Payer-signed Cancel typed data, not a Router intent. Deadline is Unix seconds, <= now+300. */
-export interface CancellationV2Request { deadline: bigint; signature: Hex }
+/** The payer's signed mandate. Registering costs neither side anything: Pact's relayer pays the gas. */
+export interface SubscriptionRequest { planId: string; mandate: Mandate; signature: Hex; discountCode?: string }
+/** Payer-signed Cancel typed data (see `cancellationTypedData`). Deadline is Unix seconds, <= now+300. */
+export interface CancellationRequest { deadline: bigint; signature: Hex }
+/** A merchant's own cancellation: off chain, effective at once; no payer signature. */
+export interface MerchantCancellationRequest { by: 'merchant' }
 export interface SubscriptionReplacementRequest extends IntentRequest { planId: string }
 export interface SubscriptionReplacement { id: string; chainId: Hex; replaces: string; status: string; txHash: Hex | null }
 export interface SubscriptionCreated { id: string; chainId: Hex; status: 'pending' | 'trialing' | 'active'; trialEndsAt?: string | null; txHash: Hex }
@@ -133,36 +146,75 @@ export interface Subscription {
   payer: Address | null; planId: string; plan: string; amount: string; periodSeconds: number; maxPeriods: number | null;
   status: SubscriptionStatus; trialEndsAt?: string | null; nextChargeAt: string; createdAt: string;
 }
-export interface RenewalRequest { amount?: string }
-export interface RenewalStatus { id: string; state: string; reason: string; operationId?: string; txHash?: Hex; automatic?: 'disabled' }
-/** Current V1 cancellation uses a payer-signed Router Intent. */
-export type CancellationRequest = IntentRequest;
+export interface RenewalStatus { id: string; state: string; reason: string; operationId?: string; txHash?: Hex }
+/** "Run renewal now": the keeper sends the charge and the contract decides. A refusal names its reason. */
+export interface RenewalResult { id: string; status: 'charged' | 'refused' | 'submitted'; txHash: Hex; refusal: string | null; subscription: Subscription }
 export interface SubscriptionMutation { id: string; status: 'submitted'; txHash: Hex }
+export interface MerchantCancellation { id: string; status: 'cancelled'; cancelledAt: string; cancelledBy: 'merchant' }
 export interface MandateNonce { nonce: string }
 
 export type ApprovalStatus = 'needs_funding' | 'needs_approval' | 'ready' | 'pending' | 'unavailable';
+/**
+ * Whether the owner's USDT can be pulled, and when not, the EIP-2612 permit to sign (`typedData`):
+ * Pact's relayer submits it and pays the gas.
+ */
 export interface ApprovalReadiness {
   paymentId: string; payer: Address; chainId: number; token: Address; spender: Address;
   /** Decimal base-unit strings (6 USDT decimals), unlike Payment.amount. */
   amount: string; balance: string | null; allowance: string | null;
-  delegate: Address; delegateState: 'none' | 'expected' | 'unknown'; approvalNonce: string | null; authorizationNonce: string | null;
-  deadline: string | null; message: Hex | null; authorizationRequired: boolean;
+  permitNonce: string | null; deadline: string | null;
+  /** JSON-safe EIP-712 permit typed data (bigints as strings); present when status is needs_approval. */
+  typedData: Record<string, unknown> | null;
   status: ApprovalStatus; reason?: string; attemptId?: string; txHash?: Hex | null;
 }
-export interface ApprovalRequest {
-  payer: Address; approvalNonce: bigint | string; deadline: bigint | string; signature: Hex;
-  /** Only address/chainId/nonce/r/s/yParity are sent; viem's v is stripped. */
-  authorization?: SignedAuthorization;
-}
+/** The signed permit. `nonce` is optional; the API checks it against the token when given. */
+export interface ApprovalRequest { payer: Address; deadline: bigint | string; signature: Hex; nonce?: bigint | string }
+export interface PermitSignature { deadline: bigint | string; signature: Hex; nonce?: bigint | string }
 export interface RefusalAttempt { id: string; objectId: string; reason: string; txHash: Hex | null; createdAt: string }
-export interface GasTank {
-  merchant: Address; balanceWei: string; dailyCapWei: string; spentTodayWei: string; runwayDays: number | null;
-  refusals: Array<{ reason: string; count: number }>;
+/**
+ * Refusal codes specific to fees. `fee_terms_required`: the merchant has not signed Pact's fee terms.
+ * `fee_below_gas`: the minimum fee no longer covers the gas (a stale WBT price). `gas_fee_unavailable`:
+ * the merchant cannot cover a refund's network fee. `signer_not_merchant`: a call that spends the
+ * merchant's money was signed by someone else. `amount_below_fee`: the payment is smaller than the
+ * minimum fee. `sponsorship_budget`: Pact covered all the free activity it can for this merchant today.
+ */
+export type FeeRefusalCode = 'fee_terms_required' | 'fee_below_gas' | 'gas_fee_unavailable' | 'signer_not_merchant' | 'amount_below_fee' | 'sponsorship_budget';
+
+/** One product's rate, for display: `bps` of the amount, at least `minimumUsdt`, at most `capUsdt`. */
+export interface FeeRateView { bps: number; percent: string; minimumUsdt: string; capUsdt: string | null }
+/** Checkout covers payments, captures and subscription renewals; invoice covers invoices the merchant sent. */
+export interface FeeTermsView { checkout: FeeRateView; invoice: FeeRateView }
+export interface FeeTermsStatus {
+  /** 0 until the merchant signs: Pact cannot take its payments before then. */
+  acceptedVersion: number; latestVersion: number;
+  accepted: FeeTermsView | null; latest: FeeTermsView;
+  needsAcceptance: boolean; newerTermsAvailable: boolean;
 }
+/** The standing USDT allowances a merchant signs once as permits. Each is spent only on calls it signs. */
+export type MerchantSpender = 'escrow' | 'router';
+export interface MerchantPermit { spender: MerchantSpender; label: string; address: Address; status: ApprovalStatus; reason: string | null }
+export interface FeeLedgerEntry {
+  id: string; at: string; kind: 'Payment' | 'Subscription' | 'Fee' | string; label: string; objectId: string;
+  /** Decimal USDT. A refund's network fee has no gross. */
+  grossUsdt: string; feeUsdt: string; netUsdt: string; txHash: Hex;
+}
+export interface FeesDetail {
+  terms: FeeTermsStatus;
+  permits: MerchantPermit[];
+  /** Terms signed and every permit in place: refunds can be sent. */
+  ready: boolean;
+  totals: { days: number; grossUsdt: string; feesUsdt: string; netUsdt: string; payments: number; effectiveRateBps: number | null };
+  ledger: FeeLedgerEntry[];
+}
+/** The latest terms and the EIP-712 `AcceptTerms` typed data to sign for them. */
+export interface FeeTermsOffer { version: number; terms: FeeTermsView; deadline: string; nonce: string; typedData: Record<string, unknown> }
+export interface AcceptTermsRequest { version: number; deadline: bigint | string; signature: Hex }
+export type AcceptedTerms = FeeTermsStatus & { txHash?: Hex };
+
 export interface ExportRequest { from?: string; to?: string; format?: 'json' | 'csv' }
 export interface ExportReport {
   rows: Array<Record<string, string>>;
-  totals: { grossUSDT: string; discountsUSDT?: string; feesUSDT: string; netUSDT: string; gasWBT: string; tokenDeltaUSDT: string | null };
+  totals: { grossUSDT: string; discountsUSDT?: string; feesUSDT: string; netUSDT: string; tokenDeltaUSDT: string | null };
   accountingBasis: string;
 }
 
@@ -188,5 +240,16 @@ export interface DashboardSummary {
   metrics: { capturedUsdt: string; refundedUsdt: string; netUsdt: string; feesUsdt: string; totalPayments: number; successfulPayments: number; authorizedPayments: number; activeSubscriptions: number; financedInvoices?: number };
   volume: Array<{ date: string; amount: string }>;
   recentActivity: Array<{ id: string; type: string; objectId: string; createdAt: string; txHash: string | null; reason: string | null }>;
-  gasTank: { available: boolean; balanceWei: string | null; dailyCapWei: string | null; spentTodayWei: string | null; runwayDays: number | null };
+  /** Whether the merchant signed Pact's fee terms. Null when it could not be read. */
+  feeTerms: { accepted: boolean | null; acceptedVersion: number | null; latestVersion: number | null };
+}
+
+/** The `payment.captured` webhook: Pact's fee came out of the payment, and `net` reached the merchant. */
+export interface PaymentCapturedWebhook {
+  id: string; api_version: string; type: 'payment.captured'; object_id: string; occurred_at: string; idempotency_key: string;
+  tx_hash: Hex; block_number: string;
+  /** USDT base units. */
+  amount_minor: string; fee_minor: string; net_minor: string;
+  metadata: Record<string, string | number | boolean>;
+  data: { amount: string; fee: string; net: string; currency: 'USDT'; customer: string | null; tx_hash: Hex; metadata: Record<string, string | number | boolean>; financed?: true };
 }
