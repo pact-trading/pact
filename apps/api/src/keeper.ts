@@ -5,7 +5,9 @@ import { now } from './db.js';
 import { enqueueWebhook } from './webhooks.js';
 import { sendDueReminders } from './invoices-live.js';
 
-export async function runKeeper(db: Db, chain: ChainAdapter, at = new Date(), renewals: Pick<Renewals, 'chain' | 'renew'> = new KeeperRenewals(db, chain)) {
+/** Renewals sent per keeper transaction when the manager supports `chargeBatch`. */
+export const RENEWAL_BATCH = 10;
+export async function runKeeper(db: Db, chain: ChainAdapter, at = new Date(), renewals: Pick<Renewals, 'chain' | 'renew'> & { renewMany?: (ids: string[]) => Promise<string[]> } = new KeeperRenewals(db, chain)) {
   if (renewals.chain !== chain) throw new Error('Keeper must share its ChainAdapter/AccountWriter');
   const invoices = db.prepare("SELECT * FROM invoices WHERE status IN ('sent','acknowledged','partially_paid','overdue')").all() as Array<Record<string, string>>;
   for (const invoice of invoices) {
@@ -28,12 +30,21 @@ export async function runKeeper(db: Db, chain: ChainAdapter, at = new Date(), re
     LEFT JOIN subscription_service_backoff b ON b.subscription_id=s.id
     WHERE s.status IN ('trialing','active','past_due') AND s.pending_tx_hash IS NULL AND s.next_charge_at<=?
     AND (b.next_attempt_at IS NULL OR b.next_attempt_at<=?)`).all(at.toISOString(), at.toISOString()) as Array<Record<string, string>>;
+  // Batch what can be batched; anything a batch did not take (or every renewal, without chargeBatch) goes alone.
+  const batched = new Set<string>();
+  if (renewals.renewMany && chain.renewBatch) {
+    const due = subs.filter(sub => sub.chain_id).map(sub => sub.id);
+    for (let i = 0; i < due.length; i += RENEWAL_BATCH) {
+      try { for (const id of await renewals.renewMany(due.slice(i, i + RENEWAL_BATCH))) batched.add(id); }
+      catch { /* fall back to single renewals below */ }
+    }
+  }
   for (const sub of subs) {
-    if (!sub.chain_id) continue;
+    if (!sub.chain_id || batched.has(sub.id)) continue;
     try { await renewals.renew(sub.id); }
     catch (error) {
       // A shared-account hold is neither a declined renewal nor a payer retry.
-      if (error instanceof Refusal && ['relayer_pending', 'subscription_pending'].includes(error.code)) continue;
+      if (error instanceof Refusal && ['relayer_pending', 'relayer_stuck', 'subscription_pending'].includes(error.code)) continue;
       // Transport/preparation errors do not prove that the payer declined. Only
       // confirmed chain events change the billing retry count and status.
       const current = db.prepare('SELECT status FROM subscriptions WHERE id=?').get(sub.id) as { status: string } | undefined;

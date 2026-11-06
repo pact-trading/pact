@@ -176,7 +176,8 @@ export class ViemFinancingChain implements FinancingChain {
       return prepared;
     }, raw => this.writerChain.broadcastTransaction(raw)), operation.id).catch(error => { writer.notSent(operation.id); throw error; });
     const receipt = await this.public.waitForTransactionReceipt({ hash, timeout: 60_000 });
-    writer.resolve(hash, receipt.blockNumber, receipt.status, gasCost(receipt).gasCostWei);
+    const cost = gasCost(receipt);
+    writer.resolve(hash, receipt.blockNumber, receipt.status, cost.gasCostWei, cost.gasUsed);
     if (receipt.status !== 'success') throw new Refusal('financing_transaction_failed');
     return hash;
   }

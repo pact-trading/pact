@@ -54,13 +54,21 @@ const write = async (address: Address, abi: Abi, functionName: string, args: unk
   wait(await wallet.writeContract({ address, abi, functionName, args, gas: 1_000_000n }));
 const selector = (abi: Abi, name: string) => getFunctionSelector(abi.find(item => item.type === 'function' && item.name === name) as never);
 
+// Uniswap's canonical Permit2, part of the forked chain: the escrow's Permit2 collector and passkey accounts use it.
+const reference = JSON.parse(readFileSync(`${root}/docs/x402/whitechain-readonly.json`, 'utf8'));
+const PERMIT2 = reference.exactPermit2 as Address;
+const permit2Code = await pub.getCode({ address: PERMIT2 });
+if (!permit2Code || keccak256(permit2Code) !== reference.runtimes[PERMIT2]?.hash) throw new Error(`Permit2 runtime mismatch at ${PERMIT2}`);
+
 // The FeeSchedule starts at the pool's WBT price; the relayer's treasury job keeps it current.
 const usdtPerWbt = await readPoolPrice(pub);
 // The relayer receives every fee until a fee vault exists, and keeps the WBT price.
 const fees = await deploy('FeeSchedule', [relayer.address, relayer.address, usdtPerWbt, termsTuple(INITIAL_TERMS)]);
 const router = await deploy('Router', [USDT, fees.address]);
-const escrow = await deploy('PaymentEscrow', [USDT, router.address, fees.address]);
+const escrow = await deploy('PaymentEscrow', [USDT, router.address, fees.address, PERMIT2]);
 const subscription = await deploy('SubscriptionManagerV2', [USDT, router.address, relayer.address, fees.address]);
+// Passkey (WebAuthn) customer accounts, which approve Permit2 when created.
+const passkeyFactory = await deploy('PasskeyAccountFactory', [USDT, PERMIT2]);
 const targets = { escrow, subscription } as const;
 for (const entry of ALLOWLIST) {
   if (entry.contract === 'receivables') continue; // Added with the receivables contract.
@@ -70,7 +78,6 @@ for (const entry of ALLOWLIST) {
 await write(router.address, router.abi, 'setLimits', [ROUTER_LIMITS.minAmount, ROUTER_LIMITS.maxPayerCallsPerDay, ROUTER_LIMITS.maxGasPerCall, ROUTER_LIMITS.maxGasPrice]);
 
 // x402: the canonical upto proxy (official CREATE2 initcode, when the fork lacks it) and the agent account factory.
-const reference = JSON.parse(readFileSync(`${root}/docs/x402/whitechain-readonly.json`, 'utf8'));
 const UPTO = reference.uptoDeployment.expectedAddress as Address;
 if (!(await pub.getCode({ address: UPTO }))) {
   await wait(await wallet.sendTransaction({ to: reference.uptoDeployment.to as Address, data: reference.uptoDeployment.data as Hex, gas: 3_000_000n }));
@@ -92,7 +99,7 @@ const deployment = {
   deploymentBlock: fees.block.toString(),
   keys: LOCAL_KEYS,
   accounts: { deployer: deployer.address, relayer: relayer.address, feeRecipient: relayer.address },
-  contracts: { fees: fees.address, router: router.address, escrow: escrow.address, subscription: subscription.address, usdt: USDT },
+  contracts: { fees: fees.address, router: router.address, escrow: escrow.address, subscription: subscription.address, usdt: USDT, permit2: PERMIT2, passkeyFactory: passkeyFactory.address },
   feeTerms: { version: 1, ...termsTuple(INITIAL_TERMS) },
   usdtPerWbt: usdtPerWbt.toString(),
   x402: { factory: factory.address, runtimeHashes },

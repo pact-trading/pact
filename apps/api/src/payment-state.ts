@@ -15,7 +15,8 @@ export function pendingPaymentIntent(db: Db, paymentId: string, escrow: string, 
       }
       if (request.intent.target.toLowerCase() !== escrow.toLowerCase()) return false;
       const call = decodeFunctionData({ abi: escrowAbi, data: request.data });
-      return ['charge', 'authorize'].includes(call.functionName) && String(call.args?.[0]).toLowerCase() === paymentId.toLowerCase();
+      if (call.functionName === 'chargeWithAuthorization' || call.functionName === 'chargeWithPermit2') return String((call.args?.[0] as { id: string }).id).toLowerCase() === paymentId.toLowerCase();
+      return ['charge', 'chargeInvoice', 'authorize'].includes(call.functionName) && String(call.args?.[0]).toLowerCase() === paymentId.toLowerCase();
     } catch { return false; }
   });
 }

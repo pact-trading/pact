@@ -37,6 +37,8 @@ export class ApprovalService {
    * for a financed invoice (the contract pays the claim holders). Set when financing is deployed.
    */
   spenderFor?: (paymentId: string) => Promise<Address | null>;
+  /** True when this payment is paid with one EIP-3009 signature: then no allowance (and no permit) is needed. */
+  collectorFor?: (paymentId: string) => Promise<boolean>;
   receivables?: Address;
   budget?: ApprovalBudget;
   private async spender(paymentId: string) { return (await this.spenderFor?.(paymentId)) ?? this.config.escrow; }
@@ -113,8 +115,13 @@ export class ApprovalService {
     const reason = this.configReason() ?? this.paymentReason(p) ?? readReason;
     if (reason || !snapshot) return { ...out, reason: reason ?? 'rpc_unavailable' };
     const amount = BigInt(p.amount_minor);
-    if (snapshot.balance < amount) return { ...out, status: 'needs_funding', reason: 'insufficient_usdt' };
+    if (snapshot.balance < amount) {
+      if (process.env.PACT_TIMING === '1') console.info(`[timing] readiness needs_funding payment=${paymentId} payer=${payer} balance=${snapshot.balance} amount=${amount}`);
+      return { ...out, status: 'needs_funding', reason: 'insufficient_usdt' };
+    }
     if (snapshot.allowance >= amount) return { ...out, status: 'ready' };
+    // One-signature checkout moves the payment with the payer's EIP-3009 authorization: nothing to approve.
+    if (!a && await this.collectorFor?.(paymentId).catch(() => false)) return { ...out, status: 'ready' };
     if (a) return { ...out, reason: 'allowance_insufficient_after_approval' };
     try { this.rate(await this.chain.gasPrice()); }
     catch (e) { return { ...out, reason: e instanceof Refusal ? e.code : 'rpc_unavailable' }; }
@@ -235,7 +242,7 @@ export class ApprovalService {
         if (!receipt || !same(receipt.hash, a.tx_hash) || receipt.block > safe) continue;
         if (receipt.status !== 'success' && receipt.status !== 'reverted') continue;
         // Finality resolves account nonce uncertainty independently of approval semantics.
-        this.chain.writer.resolve(a.tx_hash, receipt.block, receipt.status, receipt.gasCostWei);
+        this.chain.writer.resolve(a.tx_hash, receipt.block, receipt.status, receipt.gasCostWei, receipt.gasUsed);
         let status: string, reason: string | null;
         if (receipt.status === 'reverted') { status = 'failed'; reason = 'transaction_reverted'; }
         // The token's own Approval event for this owner, spender and value proves the permit took effect;

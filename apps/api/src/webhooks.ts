@@ -23,6 +23,12 @@ export function replayWebhook(db: Db, merchantId: string, eventId: string) {
     .run(id('del'), eventId, merchantId, now());
   return true;
 }
+/**
+ * Seconds before each retry after a failed delivery: quick at first, then hours, for about three days in
+ * all (as Stripe retries), so a merchant endpoint that is down for an afternoon still gets every event.
+ */
+export const WEBHOOK_RETRY_SECONDS = [2, 10, 60, 300, 1_800, 3_600, 7_200, 14_400, 28_800, 43_200, 43_200, 43_200, 43_200, 43_200];
+export const WEBHOOK_MAX_ATTEMPTS = WEBHOOK_RETRY_SECONDS.length + 1;
 export function signWebhook(body: string, secret: string) { return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`; }
 export async function deliverWebhooks(db: Db, fetcher: typeof fetch = fetch, at = new Date()) {
   const rows = db.prepare(`SELECT d.*, e.payload, m.webhook_url, m.webhook_secret FROM webhook_deliveries d JOIN webhook_events e ON e.id=d.event_id JOIN merchants m ON m.id=d.merchant_id WHERE d.status='pending' AND d.next_at<=? ORDER BY d.next_at LIMIT 50`).all(at.toISOString()) as Array<Record<string, unknown>>;
@@ -43,7 +49,7 @@ export async function deliverWebhooks(db: Db, fetcher: typeof fetch = fetch, at 
     } catch (e) { error = e instanceof Error ? e.message : String(e); }
     db.prepare('INSERT INTO webhook_attempts VALUES (?,?,?,?,?,?)').run(randomUUID(), row.id, attempt, status, error, now());
     if (!error) db.prepare("UPDATE webhook_deliveries SET attempt=?,status='delivered',last_http_status=?,last_error=NULL,delivered_at=? WHERE id=?").run(attempt, status, now(), row.id);
-    else db.prepare("UPDATE webhook_deliveries SET attempt=?,status=?,last_http_status=?,last_error=?,next_at=? WHERE id=?").run(attempt, attempt >= 8 ? 'failed' : 'pending', status, error, new Date(at.getTime() + Math.min(3_600_000, 1000 * 2 ** (attempt - 1))).toISOString(), row.id);
+    else db.prepare("UPDATE webhook_deliveries SET attempt=?,status=?,last_http_status=?,last_error=?,next_at=? WHERE id=?").run(attempt, attempt >= WEBHOOK_MAX_ATTEMPTS ? 'failed' : 'pending', status, error, new Date(at.getTime() + 1000 * WEBHOOK_RETRY_SECONDS[Math.min(attempt, WEBHOOK_RETRY_SECONDS.length) - 1]).toISOString(), row.id);
   }));
   const failures = results.filter(result => result.status === 'rejected');
   if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Webhook persistence failed');

@@ -9,16 +9,18 @@ import { product, invalid, missing } from './products.js';
 
 export type OrderRow = { id: string; merchant_id: string; customer_id: string; product_id: string; product_revision: number; product_name: string; amount_minor: string; currency: 'USDT' | 'USD'; rail: 'whitechain' | 'stripe'; payment_id: string | null; provider_session_id: string | null; created_at: string; discount_code?: string | null; amount_gross_minor?: string | null; amount_discount_minor?: string | null; metadata?: string | null };
 export function orderView(db: Db, row: OrderRow): Order {
-  const p = row.payment_id ? db.prepare('SELECT status,captured_minor,refunded_minor,expires_at FROM payments WHERE id=? AND merchant_id=?').get(row.payment_id, row.merchant_id) as { status: string; captured_minor: string; refunded_minor: string; expires_at: string | null } | undefined : undefined;
+  const p = row.payment_id ? db.prepare('SELECT status,captured_minor,refunded_minor,expires_at,finality FROM payments WHERE id=? AND merchant_id=?').get(row.payment_id, row.merchant_id) as { status: string; captured_minor: string; refunded_minor: string; expires_at: string | null; finality: string | null } | undefined : undefined;
   let status: OrderStatus = 'open';
   const captured = BigInt(p?.captured_minor ?? '0'), refunded = BigInt(p?.refunded_minor ?? '0');
   // Only the existing confirmed-event indexer writes these monetary totals.
   if (captured > 0n) status = refunded >= captured ? 'refunded' : refunded > 0n ? 'partially_refunded' : captured >= BigInt(row.amount_minor) ? 'paid' : 'pending';
+  // In a sequencer block with the payment event: paid for the customer now; `finality` says how settled it is.
+  else if (p?.finality === 'confirmed') status = 'paid';
   else if (row.payment_id && db.prepare("SELECT 1 FROM intents i JOIN relayer_operations o ON o.operation_id=i.id WHERE i.merchant_id=? AND o.kind='intent' AND o.object_id=? AND i.status IN ('submitted','reconciliation_required') LIMIT 1").get(row.merchant_id, row.payment_id)) status = 'pending';
   else if (p?.status === 'reconciliation_required' || p?.status === 'authorized') status = 'pending';
   else if (p?.status === 'expired' || (p?.expires_at && new Date(p.expires_at).getTime() <= Date.now())) status = 'expired';
   else if (p?.status === 'failed' || p?.status === 'voided') status = 'failed';
-  return { id: row.id, merchantId: row.merchant_id, customerId: row.customer_id, productId: row.product_id, productRevision: row.product_revision, productName: row.product_name, total: { currency: row.currency, amountMinor: row.amount_minor }, refundedMinor: refunded.toString(), status, rail: row.rail, paymentId: row.payment_id, providerSessionId: row.provider_session_id, createdAt: row.created_at, ...discountView(row.amount_gross_minor ?? null, row.amount_discount_minor ?? null, row.discount_code ?? null), metadata: storedMetadata(row.metadata) };
+  return { id: row.id, merchantId: row.merchant_id, customerId: row.customer_id, productId: row.product_id, productRevision: row.product_revision, productName: row.product_name, total: { currency: row.currency, amountMinor: row.amount_minor }, refundedMinor: refunded.toString(), status, finality: (p?.finality ?? null) as Order['finality'], rail: row.rail, paymentId: row.payment_id, providerSessionId: row.provider_session_id, createdAt: row.created_at, ...discountView(row.amount_gross_minor ?? null, row.amount_discount_minor ?? null, row.discount_code ?? null), metadata: storedMetadata(row.metadata) };
 }
 export function sessionView(db: Db, sessionId: string, appUrl: string) {
   const s = db.prepare('SELECT * FROM commerce_checkout_sessions WHERE id=?').get(sessionId) as { id: string; order_id: string; expires_at: string } | undefined;

@@ -76,7 +76,7 @@ const runtimeMatches = (name: string, code: Hex) => {
   };
   return executable(code) === executable(runtime.object);
 };
-const sources = ['FeeSchedule', 'Router', 'PaymentEscrow', 'SubscriptionManagerV2', 'SponsoredContext', 'Signatures', 'X402AccountFactory', 'X402AgentAccount'];
+const sources = ['FeeSchedule', 'Router', 'PaymentEscrow', 'SubscriptionManagerV2', 'SponsoredContext', 'Signatures', 'X402AccountFactory', 'X402AgentAccount', 'PasskeyAccountFactory', 'PasskeyAccount', 'WebAuthn'];
 const sourceSha256 = Object.fromEntries(sources.map(name => [`src/${name}.sol`, createHash('sha256').update(readFileSync(`${root}contracts/src/${name}.sol`)).digest('hex')]));
 
 // Chain preconditions: the token (with its EIP-2612 permit) and the pinned x402 runtimes.
@@ -92,12 +92,18 @@ for (const [address, hash] of Object.entries(runtimeHashes)) {
 const UPTO = reference.uptoDeployment.expectedAddress as Address;
 const uptoMissing = !(await pub.getCode({ address: UPTO }));
 runtimeHashes[UPTO] = reference.uptoDeployment.expectedRuntimeHash;
+// Uniswap's canonical Permit2 (its runtime is among the pinned hashes checked above): the escrow's Permit2
+// collector and passkey accounts spend through it.
+const PERMIT2 = reference.exactPermit2 as Address;
+if (!runtimeHashes[PERMIT2]) fail(`No pinned runtime for Permit2 at ${PERMIT2}`);
 
 // The plan. Every address is known up front: CREATE addresses follow the deployer nonce.
 const startNonce = await pub.getTransactionCount({ address: deployer.address, blockTag: 'latest' });
 if (startNonce !== await pub.getTransactionCount({ address: deployer.address, blockTag: 'pending' })) fail('Deployer has pending transactions; wait for them first');
 const at = (index: number) => getContractAddress({ from: deployer.address, nonce: BigInt(startNonce + index) });
-const contracts = { fees: at(0), router: at(1), escrow: at(2), subscription: at(3) };
+const contracts = { fees: at(0), router: at(1), escrow: at(2), subscription: at(3), passkeyFactory: at(4) };
+// The factory creates its account template (the clones' implementation) in its constructor: its nonce 1.
+const passkeyImplementation = getContractAddress({ from: contracts.passkeyFactory, nonce: 1n });
 const limits = ROUTER_LIMITS;
 // The rehearsal records the price it used; the testnet run uses exactly that, so the plan matches.
 const priorRehearsal = args.rehearsal ? JSON.parse(readFileSync(args.rehearsal, 'utf8')) : undefined;
@@ -111,8 +117,10 @@ const suiteEntries = ALLOWLIST.filter(entry => entry.contract !== 'receivables')
 const plan: Step[] = [
   create('FeeSchedule', [feeRecipient, relayer, usdtPerWbt, termsTuple(INITIAL_TERMS)]),
   create('Router', [USDT, contracts.fees]),
-  create('PaymentEscrow', [USDT, contracts.router, contracts.fees]),
+  create('PaymentEscrow', [USDT, contracts.router, contracts.fees, PERMIT2]),
   create('SubscriptionManagerV2', [USDT, contracts.router, relayer, contracts.fees]),
+  // Passkey (WebAuthn) customer accounts, which approve Permit2 for USDT when created.
+  create('PasskeyAccountFactory', [USDT, PERMIT2]),
   ...suiteEntries.map(entry => {
     const [name, address] = targetOf[entry.contract as 'escrow' | 'subscription'];
     return call('Router', contracts.router, 'setAllowed', [address, selector(name, entry.fn), ...allowFlags(entry)]);
@@ -123,7 +131,7 @@ const plan: Step[] = [
 ];
 const factory = at(plan.length);
 plan.push(create('X402AccountFactory'));
-for (const address of [...Object.values(contracts), factory]) if (await pub.getCode({ address })) fail(`Predicted address ${address} already has code`);
+for (const address of [...Object.values(contracts), passkeyImplementation, factory]) if (await pub.getCode({ address })) fail(`Predicted address ${address} already has code`);
 
 // Gas: a rehearsal measures it; a testnet run uses the rehearsed amounts plus a margin, and must match the plan exactly.
 let gasLimits: bigint[];
@@ -149,7 +157,8 @@ const record = {
   status: 'broadcasting', mode: local ? 'rehearsal' : 'testnet', chainId: 1874, rpcUrl: local ? 'local-fork' : args.rpc,
   startedAt: new Date().toISOString(), completedAt: null as string | null,
   accounts: { deployer: deployer.address, relayer, keeper: relayer, priceKeeper: relayer, feeRecipient },
-  contracts: { ...contracts, usdt: USDT },
+  contracts: { ...contracts, usdt: USDT, permit2: PERMIT2 },
+  passkeys: { factory: contracts.passkeyFactory, implementation: passkeyImplementation },
   x402: { factory, upto: UPTO, uptoDeployed: uptoMissing, runtimeHashes },
   feeTerms: { version: 1, ...JSON.parse(JSON.stringify(termsTuple(INITIAL_TERMS), (_, v) => typeof v === 'bigint' ? String(v) : v)) },
   usdtPerWbt: String(usdtPerWbt),
@@ -198,9 +207,13 @@ try {
     [contracts.fees, 'FeeSchedule', 'latestVersion', [], 1n], [contracts.fees, 'FeeSchedule', 'terms', [1], termsTuple(INITIAL_TERMS)],
     [contracts.router, 'Router', 'owner', [], deployer.address], [contracts.router, 'Router', 'usdt', [], USDT], [contracts.router, 'Router', 'fees', [], contracts.fees],
     [contracts.escrow, 'PaymentEscrow', 'usdt', [], USDT], [contracts.escrow, 'PaymentEscrow', 'router', [], contracts.router], [contracts.escrow, 'PaymentEscrow', 'fees', [], contracts.fees],
+    [contracts.escrow, 'PaymentEscrow', 'permit2', [], PERMIT2],
     [contracts.subscription, 'SubscriptionManagerV2', 'owner', [], deployer.address], [contracts.subscription, 'SubscriptionManagerV2', 'usdt', [], USDT],
     [contracts.subscription, 'SubscriptionManagerV2', 'router', [], contracts.router], [contracts.subscription, 'SubscriptionManagerV2', 'keeper', [], relayer],
     [contracts.subscription, 'SubscriptionManagerV2', 'fees', [], contracts.fees],
+    [contracts.passkeyFactory, 'PasskeyAccountFactory', 'implementation', [], passkeyImplementation],
+    [passkeyImplementation, 'PasskeyAccount', 'usdt', [], USDT], [passkeyImplementation, 'PasskeyAccount', 'permit2', [], PERMIT2],
+    [passkeyImplementation, 'PasskeyAccount', 'factory', [], contracts.passkeyFactory],
     ...Object.entries(limits).map(([fn, value]) => [contracts.router, 'Router', fn, [], BigInt(value)] as [Address, string, string, unknown[], unknown]),
     ...suiteEntries.map(entry => {
       const [name, address] = targetOf[entry.contract as 'escrow' | 'subscription'];
@@ -212,7 +225,7 @@ try {
     const norm = (v: unknown) => JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? String(x) : typeof x === 'string' ? x.toLowerCase() : x));
     if (norm(typeof got === 'number' ? BigInt(got) : got) !== norm(wanted)) throw new Error(`${name}.${fn} is ${norm(got)}, expected ${norm(wanted)}`);
   }
-  for (const [name, address] of [['FeeSchedule', contracts.fees], ['Router', contracts.router], ['PaymentEscrow', contracts.escrow], ['SubscriptionManagerV2', contracts.subscription], ['X402AccountFactory', factory]] as const) {
+  for (const [name, address] of [['FeeSchedule', contracts.fees], ['Router', contracts.router], ['PaymentEscrow', contracts.escrow], ['SubscriptionManagerV2', contracts.subscription], ['PasskeyAccountFactory', contracts.passkeyFactory], ['PasskeyAccount', passkeyImplementation], ['X402AccountFactory', factory]] as const) {
     const code = await pub.getCode({ address });
     if (!code || !runtimeMatches(name, code)) throw new Error(`${name} runtime differs from the compiled source`);
   }

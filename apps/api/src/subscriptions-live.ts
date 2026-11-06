@@ -46,6 +46,32 @@ export class KeeperRenewals implements Renewals {
     const txHash = await this.chain.renew(sub.chain_id, renewalDiscountAmount(this.db, subscriptionId, chargedPeriods(this.db, sub.chain_id) + 1), operation);
     return { state: 'submitted', reason: '', operationId: operation.id, txHash };
   }
+  /**
+   * Due renewals in one keeper transaction (`chargeBatch`): the same eligibility as `renew`, one nonce and
+   * one intrinsic cost for all. Each renewal still settles, or is refused, on its own event.
+   * Returns the subscriptions it took; an ineligible one is skipped and left to `renew`.
+   */
+  async renewMany(subscriptionIds: string[]): Promise<string[]> {
+    if (!this.chain.renewBatch) return [];
+    const rows = subscriptionIds.map(id => ({ id, sub: this.db.prepare('SELECT s.chain_id,s.status,s.cancelled_by,s.trial_ends_at FROM subscriptions s WHERE s.id=?').get(id) as { chain_id: Hex | null; status: string; cancelled_by: string | null; trial_ends_at: string | null } | undefined }))
+      .filter(({ sub }) => sub?.chain_id && sub.cancelled_by !== 'merchant' && !(sub.trial_ends_at && Date.parse(sub.trial_ends_at) > Date.now()));
+    if (rows.length < 2) return [];
+    const operation: WriteOperation = { id: id('renew'), kind: 'renew', objectId: 'batch', links: { subscriptionIds: [] } };
+    this.chain.writer.reserve(operation, () => {
+      for (const { id: subscriptionId } of rows) {
+        try { assertSubscriptionAvailable(this.db, subscriptionId); operation.links!.subscriptionIds!.push(subscriptionId); }
+        catch { /* pending elsewhere: not in this batch */ }
+      }
+      this.db.prepare('UPDATE relayer_operations SET links_json=? WHERE operation_id=?').run(JSON.stringify(operation.links), operation.id);
+    });
+    const taken = operation.links!.subscriptionIds!;
+    if (taken.length < 2) { this.chain.writer.notSent(operation.id, 'batch_too_small'); return []; }
+    const chainIds = taken.map(id => rows.find(r => r.id === id)!.sub!.chain_id!);
+    const amounts = chainIds.map((chainId, i) => renewalDiscountAmount(this.db, taken[i], chargedPeriods(this.db, chainId) + 1));
+    for (const subscriptionId of taken) setRenewalStatus(this.db, subscriptionId, 'pending', 'submitted', operation.id);
+    await this.chain.renewBatch(chainIds, amounts, operation);
+    return taken;
+  }
 }
 
 type PlanRow = { trial_days: number; id: string; merchant_id: string; name: string; amount_minor: string; period_seconds: number; max_periods: number | null; created_at: string; description: string | null; status: string | null; archived_at: string | null };

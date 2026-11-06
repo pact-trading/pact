@@ -1,7 +1,8 @@
+import { nextRouterNonce } from '../write-reservations.js';
 import { availableTrialDays } from '../subscription-trials.js';
 import { randomBytes } from 'node:crypto';
 import type { Context, Hono } from 'hono';
-import { encodeFunctionData, keccak256, toHex, type Address, type Hex } from 'viem';
+import { encodeFunctionData, keccak256, parseSignature, recoverTypedDataAddress, toHex, type Abi, type Address, type Hex } from 'viem';
 import type { ApprovalService } from '../approval.js';
 import { subscriptionAbi } from '../chain.js';
 import { id, now, type Db } from '../db.js';
@@ -9,9 +10,9 @@ import { IdentityError, type VerifiedIdentity } from '../identity.js';
 import { checkoutSettings } from '../merchant-settings.js';
 import type { Relayer } from '../relayer.js';
 import { planRow, planSummary, subscriptionDetail, subscriptionRows } from '../subscriptions-live.js';
-import { cancellationTypedData, intentTypedData, mandateTypedData } from '../typed-data.js';
+import { cancellationTypedData, intentTypedData, mandateTypedData, permitTypedData } from '../typed-data.js';
 import { assertSubscriptionAvailable } from '../write-reservations.js';
-import type { ChainAdapter } from '../types.js';
+import { Refusal, type ChainAdapter, type Mandate } from '../types.js';
 
 export interface PayerSubscriptionServices {
   db: Db; chain: ChainAdapter; approval: ApprovalService; relayer: Relayer; router: Address; subscription: Address;
@@ -21,6 +22,31 @@ export interface PayerSubscriptionServices {
 }
 /** How many periods the one-time USDT approval covers, so renewals need no further signature. */
 const APPROVED_PERIODS = 12;
+/** The manager approves and subscribes in one call (`subscribeWithPermit`, SubscriptionManager v3). */
+export const subscribeWithPermitAvailable = () => (subscriptionAbi as Abi).some(item => item.type === 'function' && item.name === 'subscribeWithPermit');
+/** The payer's EIP-2612 permit for the SubscriptionManager, posted with the mandate for a one-transaction subscribe. */
+export interface SubscribePermit { value?: unknown; deadline?: unknown; signature?: unknown }
+/**
+ * The calldata of a one-transaction subscribe, after checking the payer's permit: the payer signed it, for
+ * the SubscriptionManager, against the token's current nonce, for at least one period and at most the
+ * mandate's periods, expiring within the hour. The manager applies the permit then subscribes, in one
+ * relayer transaction; the relayer still simulates it before sending.
+ */
+export async function subscribeWithPermitData(chain: ChainAdapter, subscription: Address, mandate: Mandate, signature: Hex, permit: SubscribePermit): Promise<Hex> {
+  if (!subscribeWithPermitAvailable()) throw new Refusal('permit_subscribe_unavailable');
+  if (typeof permit.signature !== 'string' || !/^\d{1,78}$/.test(String(permit.value)) || !/^\d{1,20}$/.test(String(permit.deadline))) throw new Refusal('invalid_permit');
+  const value = BigInt(String(permit.value)), deadline = BigInt(String(permit.deadline));
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  if (deadline <= now || deadline > now + 3_600n) throw new Refusal('permit_expired');
+  if (value < mandate.amountCap || value > mandate.amountCap * BigInt(mandate.maxPeriods)) throw new Refusal('invalid_permit', 'The permit must cover one to all periods of the mandate');
+  const { nonce } = await chain.approval.snapshot(mandate.payer, subscription);
+  let signer: Address;
+  try { signer = await recoverTypedDataAddress({ ...permitTypedData(mandate.payer, subscription, value, nonce, deadline), signature: permit.signature as Hex }); }
+  catch { throw new Refusal('invalid_permit'); }
+  if (signer.toLowerCase() !== mandate.payer.toLowerCase()) throw new Refusal('invalid_permit');
+  const { r, s: sv, v, yParity } = parseSignature(permit.signature as Hex);
+  return encodeFunctionData({ abi: subscriptionAbi, functionName: 'subscribeWithPermit', args: [mandate, signature, value, deadline, Number(v ?? 27n + BigInt(yParity!)), r, sv] });
+}
 const json = (value: unknown) => JSON.parse(JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v.toString() : v)));
 const bad = (code: string, status: 400 | 403 | 404 | 409 = 400): never => { throw new IdentityError(code, status); };
 
@@ -72,7 +98,11 @@ export function mountPayerSubscriptions(app: Hono, s: PayerSubscriptionServices,
       periodSeconds: period, maxPeriods: periods, endTime: BigInt(Math.floor(Date.now() / 1000)) + BigInt(plan.trial_days ?? 0) * 86_400n + period * BigInt(periods + 1) + 86_400n,
       nonce: await s.chain.mandateNonce(user.wallet.address),
     };
-    return c.json(json({ approvalKey: key, approval, mandate, typedData: mandateTypedData(mandate, s.subscription) }));
+    // One transaction: when the allowance is short and the manager can take a permit with the mandate, the
+    // payer signs both now and Pact sends them together (no approval transaction to wait for).
+    const permit = subscribeWithPermitAvailable() && approval.status === 'needs_approval' && approval.typedData && approval.deadline
+      ? { value: approval.amount, deadline: approval.deadline, nonce: approval.permitNonce, typedData: approval.typedData } : undefined;
+    return c.json(json({ approvalKey: key, approval, mandate, typedData: mandateTypedData(mandate, s.subscription), ...(permit ? { permit } : {}) }));
   });
   app.get('/plans/:id/approval/:key', async c => {
     const user = await payer(c), plan = activePlan(c.req.param('id'));
@@ -91,7 +121,13 @@ export function mountPayerSubscriptions(app: Hono, s: PayerSubscriptionServices,
     // The subscriber is this merchant's customer, like a buyer at checkout.
     const existing = db.prepare('SELECT id FROM commerce_customers WHERE merchant_id=? AND subject_id=?').get(plan.merchant_id, user.userId);
     if (!existing) db.prepare('INSERT INTO commerce_customers VALUES (?,?,?,?,?,?,?)').run(id('cus'), plan.merchant_id, user.userId, user.wallet.address.toLowerCase(), user.email, null, now());
-    const created = await s.register({ planId: plan.id, mandate, signature: b.signature, discountCode: b.discountCode }, { merchantId: merchant.id, address: merchant.address, kind: 'secret' }, user.userId);
+    const permit = b.permit && typeof b.permit === 'object' ? b.permit as SubscribePermit : undefined;
+    // Check the permit before anything is reserved, so a bad one leaves no subscription behind.
+    if (permit) {
+      const m = mandate as Record<string, string>;
+      await subscribeWithPermitData(s.chain, s.subscription, { payer: m.payer as Address, merchant: m.merchant as Address, planId: m.planId as Hex, amountCap: BigInt(m.amountCap), periodSeconds: BigInt(m.periodSeconds), maxPeriods: Number(m.maxPeriods), endTime: BigInt(m.endTime), nonce: BigInt(m.nonce) }, b.signature as Hex, permit);
+    }
+    const created = await s.register({ planId: plan.id, mandate, signature: b.signature, discountCode: b.discountCode, ...(permit ? { permit } : {}) }, { merchantId: merchant.id, address: merchant.address, kind: 'secret' }, user.userId);
     return c.json(created, 201);
   });
 
@@ -185,7 +221,7 @@ export function mountPayerSubscriptions(app: Hono, s: PayerSubscriptionServices,
     const data = encodeFunctionData({ abi: subscriptionAbi, functionName: 'replace', args: [row.chain_id!, mandate, b.signature as Hex] });
     const quote = await s.relayer.quote();
     const merchant = merchantOf(row.merchant_id);
-    const intent = { signer: user.wallet.address, merchant: merchant.address, target: s.subscription, dataHash: keccak256(data), amount: BigInt(plan.amount_minor), nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
+    const intent = { signer: user.wallet.address, merchant: merchant.address, target: s.subscription, dataHash: keccak256(data), amount: BigInt(plan.amount_minor), nonce: nextRouterNonce(s.db, user.wallet.address), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
     return c.json(json({ data, intent, typedData: intentTypedData(intent, s.router) }));
   });
   app.post('/me/subscriptions/:id/change', async c => {

@@ -24,17 +24,22 @@ export interface ChainEvent {
   timestamp?: string;
   /** Where the FeeSchedule sent fees at this event's block: Pact's relayer, later a fee vault. */
   feeRecipient?: Address;
+  /** The hash of the block the event was in: compared with the chain again before the event counts as final. */
+  blockHash?: Hex;
   /** Escrow state read at this event's block; not an invented event argument. */
   paymentTerms?: { refundWindowSeconds: string; refundDeadlineUnix: string };
 }
 export interface ChainReceipt {
   txHash: Hex;
   block: bigint;
+  blockHash?: Hex;
   status: 'success' | 'reverted';
   // Only decoded events from the configured suite, never arbitrary log emitters.
   events: ChainEvent[];
-  /** What the transaction cost its sender in WBT wei (gas used times the effective price), when known. */
+  /** What the transaction cost its sender in WBT wei (execution gas plus the L1 data fee), when known. */
   gasCostWei?: bigint;
+  /** Execution gas used, when known. */
+  gasUsed?: bigint;
 }
 export interface TransactionGas { gas: bigint; gasPrice: bigint }
 export interface Simulation { accepted: boolean; reason?: string; gas: bigint }
@@ -57,8 +62,24 @@ export interface MerchantFees {
   /** The merchant's acceptance-signature nonce. */
   nonce: bigint;
 }
+export interface TokenTransfer { from: Address; to: Address; value: bigint }
+/** How settled the chain is: the newest block, the newest whose batch is on Ethereum (`safe`), and the newest
+ * that can no longer be reversed (`finalized`). On Whitechain (OP Stack) `latest` is the sequencer's word only. */
+export interface FinalityHeads { latest: bigint; safe: bigint; finalized: bigint }
+/** Where the ledger is written: at the sequencer's block (`latest`), once its batch is on Ethereum, or once final. */
+export type Finality = 'latest' | 'safe' | 'finalized';
 export interface ChainAdapter {
   writer: AccountWriter;
+  /** The three heads, for staged payment finality. */
+  finalityHeads(): Promise<FinalityHeads>;
+  /** The canonical hash of a block, or null when the chain has no such block (yet). */
+  blockHash(block: bigint): Promise<Hex | null>;
+  /** The escrow's EIP-3009 nonce for these one-signature charge terms. */
+  authorizationNonce(terms: import('./collector.js').ChargeTerms): Promise<Hex>;
+  /** One-signature checkout is available: the escrow has `chargeWithAuthorization` and USDT's domain matches. */
+  collectorReady(): Promise<boolean>;
+  /** The USDT transfers a mined transaction made, from its receipt logs; null when there is no receipt. */
+  tokenTransfers(hash: Hex): Promise<TokenTransfer[] | null>;
   approval: ApprovalChain;
   chainId(): Promise<number>;
   latestBlock(): Promise<bigint>;
@@ -78,8 +99,10 @@ export interface ChainAdapter {
    * signed financing orders. Simulated first, so a call that would revert is refused before it costs
    * gas; journaled and budgeted like every other relayer write.
    */
-  relay(operation: WriteOperation, to: Address, data: Hex, gas: bigint): Promise<Hex>;
+  relay(operation: WriteOperation, to: Address, data: Hex, gas: bigint, budgetWei?: bigint): Promise<Hex>;
   renew(subscriptionId: Hex, amount: bigint, operation?: WriteOperation): Promise<Hex>;
+  /** Several renewals in one keeper transaction (`chargeBatch`), when the manager has it; otherwise undefined. */
+  renewBatch?(subscriptionIds: Hex[], amounts: bigint[], operation: WriteOperation): Promise<Hex>;
   subscribe(mandate: Mandate, signature: Hex, operation?: WriteOperation): Promise<Hex>;
   cancelSigned(subscriptionId: Hex, deadline: bigint, signature: Hex, operation?: WriteOperation): Promise<Hex>;
   mandateNonce(payer: Address): Promise<bigint>;

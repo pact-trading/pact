@@ -59,8 +59,17 @@ export function openDb(path: string | Buffer = ':memory:'): Db {
   if (!(db.pragma('table_info(plans)') as Array<{ name: string }>).some(x => x.name === 'trial_days')) db.exec('ALTER TABLE plans ADD COLUMN trial_days INTEGER NOT NULL DEFAULT 0');
   for (const column of ['cancelled_at', 'cancelled_by', 'trial_ends_at', 'trial_customer_subject_id']) if (!(db.pragma('table_info(subscriptions)') as Array<{ name: string }>).some(x => x.name === column)) db.exec(`ALTER TABLE subscriptions ADD COLUMN ${column} TEXT`);
   if (!(db.pragma('table_info(payments)') as Array<{ name: string }>).some(x => x.name === 'payer')) db.exec('ALTER TABLE payments ADD COLUMN payer TEXT');
+  // Staged finality: confirmed (in a sequencer block), settled (batch on Ethereum), final (irreversible),
+  // with the transaction and block it was seen in, rechecked before it counts as final.
+  for (const column of ['finality', 'finality_tx_hash', 'finality_block', 'finality_block_hash']) if (!(db.pragma('table_info(payments)') as Array<{ name: string }>).some(x => x.name === column)) db.exec(`ALTER TABLE payments ADD COLUMN ${column} TEXT`);
+  db.exec('CREATE INDEX IF NOT EXISTS payments_finality ON payments(finality); CREATE INDEX IF NOT EXISTS payments_finality_hash ON payments(lower(finality_tx_hash));');
   // What each confirmed relayer write actually cost Pact in gas: Pact's margin is its fees less this.
   if (!(db.pragma('table_info(relayer_operations)') as Array<{ name: string }>).some(x => x.name === 'gas_cost_wei')) db.exec('ALTER TABLE relayer_operations ADD COLUMN gas_cost_wei TEXT');
+  // Measured execution gas per kind of call (`target:selector`): the relayer budgets with it instead of the gas limit.
+  // The signed transaction itself: rebroadcasting these exact bytes (same nonce, same hash) is always safe.
+  for (const column of ['raw_tx', 'broadcast_attempts', 'last_error']) if (!(db.pragma('table_info(relayer_operations)') as Array<{ name: string }>).some(x => x.name === column)) db.exec(`ALTER TABLE relayer_operations ADD COLUMN ${column} TEXT`);
+  for (const column of ['gas_used', 'call_key']) if (!(db.pragma('table_info(relayer_operations)') as Array<{ name: string }>).some(x => x.name === column)) db.exec(`ALTER TABLE relayer_operations ADD COLUMN ${column} TEXT`);
+  db.exec('CREATE INDEX IF NOT EXISTS relayer_operations_call ON relayer_operations(call_key)');
   // A label for each API key, and the merchant's display preferences (live mode).
   if (!(db.pragma('table_info(api_keys)') as Array<{ name: string }>).some(x => x.name === 'name')) db.exec("ALTER TABLE api_keys ADD COLUMN name TEXT NOT NULL DEFAULT ''");
   db.exec("CREATE TABLE IF NOT EXISTS merchant_preferences(merchant_id TEXT PRIMARY KEY, brand_color TEXT NOT NULL, updated_at TEXT NOT NULL)");
@@ -70,6 +79,26 @@ export function openDb(path: string | Buffer = ':memory:'): Db {
   db.exec('CREATE TABLE IF NOT EXISTS sponsored_spend(operation_id TEXT PRIMARY KEY, merchant_id TEXT NOT NULL, day TEXT NOT NULL, cost_wei TEXT NOT NULL, kind TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS sponsored_spend_day ON sponsored_spend(merchant_id,day);');
   // Where a refusal happened (relayer, contract, api) and who signed the refused request.
   for (const column of ['source', 'signer']) if (!(db.pragma('table_info(refusal_attempts)') as Array<{ name: string }>).some(x => x.name === column)) db.exec(`ALTER TABLE refusal_attempts ADD COLUMN ${column} TEXT`);
+  // The spend budget each relayer write reserves (created here so every query below can be indexed).
+  db.exec('CREATE TABLE IF NOT EXISTS relayer_spend_reservations(operation_id TEXT PRIMARY KEY, minute INTEGER NOT NULL, cost_wei TEXT NOT NULL)');
+  // Hot-path indexes. Hash lookups compare lower(...), so the indexes are on the same expressions.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS relayer_operations_phase ON relayer_operations(chain_id,relayer,phase);
+    CREATE INDEX IF NOT EXISTS relayer_operations_hash ON relayer_operations(lower(tx_hash));
+    CREATE INDEX IF NOT EXISTS relayer_operations_object ON relayer_operations(object_id,kind,phase);
+    CREATE INDEX IF NOT EXISTS relayer_spend_minute ON relayer_spend_reservations(minute);
+    CREATE INDEX IF NOT EXISTS intents_hash ON intents(lower(tx_hash));
+    CREATE INDEX IF NOT EXISTS intents_status ON intents(status);
+    CREATE INDEX IF NOT EXISTS refunds_hash ON refunds(lower(tx_hash));
+    CREATE INDEX IF NOT EXISTS refunds_payment ON refunds(payment_id,status);
+    CREATE INDEX IF NOT EXISTS subscriptions_pending ON subscriptions(lower(pending_tx_hash));
+    CREATE INDEX IF NOT EXISTS subscriptions_chain ON subscriptions(chain_id);
+    CREATE INDEX IF NOT EXISTS subscriptions_due ON subscriptions(status,next_charge_at);
+    CREATE INDEX IF NOT EXISTS payments_merchant ON payments(merchant_id,created_at);
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries(status,next_at);
+    CREATE INDEX IF NOT EXISTS refusal_attempts_object ON refusal_attempts(merchant_id,object_id);
+    CREATE INDEX IF NOT EXISTS approval_attempts_created ON approval_attempts(created_at);
+  `);
   initAccounting(db);
   initCommerce(db);
   initDiscounts(db);

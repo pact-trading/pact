@@ -1,5 +1,6 @@
-import { createPublicClient, createWalletClient, decodeEventLog, defineChain, encodeFunctionData, erc20Abi, http, keccak256, parseAbi, parseSignature, TransactionReceiptNotFoundError, type Address, type Hex, type LocalAccount } from 'viem';
+import { createPublicClient, createWalletClient, decodeEventLog, defineChain, encodeFunctionData, erc20Abi, http, keccak256, parseAbi, parseSignature, TransactionReceiptNotFoundError, type Abi, type Address, type Hex, type LocalAccount } from 'viem';
 import { USDT } from './token.js';
+import { readAll } from './reads.js';
 
 /** Whitechain USDT's EIP-2612 surface. */
 export const permitAbi = parseAbi([
@@ -11,14 +12,25 @@ export const permitAbi = parseAbi([
 export interface ApprovalSnapshot { balance: bigint; allowance: bigint; nonce: bigint }
 /** A permit the owner signed, for Pact's relayer to submit. */
 export interface ApprovalCall { owner: Address; spender: Address; value: bigint; deadline: bigint; signature: Hex }
-/** What a mined transaction cost its sender, when the receipt reports gas used and the effective price. */
-export const gasCost = (receipt: { gasUsed?: bigint; effectiveGasPrice?: bigint }): { gasCostWei?: bigint } =>
-  typeof receipt.gasUsed === 'bigint' && typeof receipt.effectiveGasPrice === 'bigint' ? { gasCostWei: receipt.gasUsed * receipt.effectiveGasPrice } : {};
+const wei = (value: unknown) => typeof value === 'bigint' ? value : typeof value === 'string' && /^0x[\da-f]+$/i.test(value) ? BigInt(value) : 0n;
+/**
+ * What a mined transaction cost its sender: gas used times the effective price, plus, on an OP Stack chain
+ * such as Whitechain, the L1 data fee (`l1Fee`) and the operator fee the receipt reports. Also returns the
+ * gas used, which the relayer budgets future calls of the same kind with.
+ */
+export const gasCost = (receipt: { gasUsed?: bigint; effectiveGasPrice?: bigint }): { gasCostWei?: bigint; gasUsed?: bigint } => {
+  if (typeof receipt.gasUsed !== 'bigint' || typeof receipt.effectiveGasPrice !== 'bigint') return {};
+  const op = receipt as { l1Fee?: unknown; operatorFeeScalar?: unknown; operatorFeeConstant?: unknown };
+  // Isthmus operator fee: gasUsed * scalar / 1e6 + constant.
+  const operatorFee = receipt.gasUsed * wei(op.operatorFeeScalar) / 1_000_000n + wei(op.operatorFeeConstant);
+  return { gasCostWei: receipt.gasUsed * receipt.effectiveGasPrice + wei(op.l1Fee) + operatorFee, gasUsed: receipt.gasUsed };
+};
 export interface ApprovalReceipt {
   hash: Hex; block: bigint; status: 'success' | 'reverted';
   approvals: Array<{ owner: Address; spender: Address; value: bigint }>;
   /** What the permit transaction cost Pact's relayer, in WBT wei. */
   gasCostWei?: bigint;
+  gasUsed?: bigint;
 }
 /** USDT allowances: read them, and submit a signed permit from the relayer, which pays the gas. */
 export interface ApprovalChain {
@@ -31,23 +43,25 @@ export function permitCalldata(call: ApprovalCall): Hex {
   const { r, s, v, yParity } = parseSignature(call.signature);
   return encodeFunctionData({ abi: permitAbi, functionName: 'permit', args: [call.owner, call.spender, call.value, call.deadline, Number(v ?? 27n + BigInt(yParity)), r, s] });
 }
-const network = defineChain({ id: 1874, name: 'Whitechain Sepolia', nativeCurrency: { name: 'WBT', symbol: 'WBT', decimals: 18 }, rpcUrls: { default: { http: ['https://rpc.testnet.whitechain.io'] } }, testnet: true });
+const network = defineChain({ id: 1874, name: 'Whitechain Sepolia', nativeCurrency: { name: 'WBT', symbol: 'WBT', decimals: 18 }, rpcUrls: { default: { http: ['https://rpc.testnet.whitechain.io'] } }, contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } }, testnet: true });
 export class ViemApprovalChain implements ApprovalChain {
   private public;
   private wallet;
   constructor(rpc: string, private account: LocalAccount) {
     // Broadcast retries are disabled, including transport retries.
-    this.public = createPublicClient({ chain: network, transport: http(rpc, { retryCount: 0, timeout: 10_000 }) });
+    // Requests issued together go out as one JSON-RPC batch.
+    const batch = process.env.RPC_BATCH !== '0';
+    this.public = createPublicClient({ chain: network, cacheTime: 0, transport: http(rpc, { retryCount: 6, retryDelay: 200, timeout: 10_000, ...(batch ? { batch: { batchSize: 50, wait: 0 } } : {}) }) });
     this.wallet = createWalletClient({ chain: network, account, transport: http(rpc, { retryCount: 0, timeout: 10_000 }) });
   }
   async snapshot(owner: Address, spender: Address): Promise<ApprovalSnapshot> {
     // Never a cached block number: with 1-second blocks a cached one can predate the permit.
     const blockNumber = await this.public.getBlockNumber({ cacheTime: 0 });
-    const [balance, allowance, nonce] = await Promise.all([
-      this.public.readContract({ address: USDT, abi: erc20Abi, functionName: 'balanceOf', args: [owner], blockNumber }),
-      this.public.readContract({ address: USDT, abi: erc20Abi, functionName: 'allowance', args: [owner, spender], blockNumber }),
-      this.public.readContract({ address: USDT, abi: permitAbi, functionName: 'nonces', args: [owner], blockNumber }),
-    ]);
+    const [balance, allowance, nonce] = await readAll(this.public, [
+      { address: USDT, abi: erc20Abi as Abi, functionName: 'balanceOf', args: [owner] },
+      { address: USDT, abi: erc20Abi as Abi, functionName: 'allowance', args: [owner, spender] },
+      { address: USDT, abi: permitAbi as Abi, functionName: 'nonces', args: [owner] },
+    ], blockNumber) as [bigint, bigint, bigint];
     return { balance, allowance, nonce };
   }
   async prepare(call: ApprovalCall, nonce: number, gas: bigint, price: bigint) {

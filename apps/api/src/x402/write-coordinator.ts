@@ -192,7 +192,8 @@ export class X402WriteCoordinator {
         if (receipt.block > await ports.latestBlock() - BigInt(row.confirmations)) continue;
         const matches = receipt.status === 'success' && await this.matches(row, receipt);
         db.transaction(() => {
-          writer.resolve(write.tx_hash!, receipt.block, receipt.status, gasCost(receipt).gasCostWei);
+          const cost = gasCost(receipt);
+          writer.resolve(write.tx_hash!, receipt.block, receipt.status, cost.gasCostWei, cost.gasUsed);
           if (receipt.status === 'reverted') this.finish(row, false, 'transaction_reverted');
           else if (matches) this.finish(row, true);
           else db.prepare("UPDATE x402_operations SET state='reconciliation_required',updated_at=? WHERE operation_key=? AND state NOT IN ('succeeded','failed')").run(this.time(), row.operation_key);

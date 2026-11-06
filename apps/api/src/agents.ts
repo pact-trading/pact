@@ -74,7 +74,8 @@ export class AgentService {
       return prepared;
     }, raw => this.chain.broadcastTransaction(raw)), operation.id).catch(error => { this.chain.writer.notSent(operation.id); throw error; });
     const receipt = await this.pub.waitForTransactionReceipt({ hash, timeout: 60_000 });
-    this.chain.writer.resolve(hash, receipt.blockNumber, receipt.status, gasCost(receipt).gasCostWei);
+    const cost = gasCost(receipt);
+    this.chain.writer.resolve(hash, receipt.blockNumber, receipt.status, cost.gasCostWei, cost.gasUsed);
     if (receipt.status !== 'success') throw new Refusal('agent_transaction_failed');
     return hash;
   }

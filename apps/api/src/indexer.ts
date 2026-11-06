@@ -4,12 +4,14 @@ import { orderEvent } from './commerce/events.js';
 import { chargedPeriods, discountView, renewalDiscountAmount } from './discounts.js';
 import { decodeFunctionData, encodeAbiParameters, keccak256, toHex, type Hex } from 'viem';
 import { escrowAbi, receivablesAbi, subscriptionAbi } from './chain.js';
-import type { ChainAdapter, ChainEvent, IntentRequest } from './types.js';
+import type { ChainAdapter, ChainEvent, ChainReceipt, Finality, FinalityHeads, IntentRequest } from './types.js';
 import type { Db } from './db.js';
+import type { AccountWriter } from './account-writer.js';
 import { id, now } from './db.js';
 import { enqueueWebhook } from './webhooks.js';
 import { recordAccounting } from './accounting.js';
 import { deadlineIso } from './merchant-settings.js';
+import { stopwatch } from './timing.js';
 
 type Row = Record<string, string>;
 /** Router.Refusal, in the contract's enum order. */
@@ -19,6 +21,11 @@ const matches = (event: ChainEvent, contract: ChainEvent['contract'], name: stri
 function expectedEvent(request: IntentRequest): { contract: ChainEvent['contract']; name: string; args: Record<string, unknown>; paymentId?: string } | undefined {
   try {
     const { functionName: name, args = [] } = decodeFunctionData({ abi: escrowAbi, data: request.data });
+    // A one-signature charge: the terms tuple carries the payment.
+    if (name === 'chargeWithAuthorization' || name === 'chargeWithPermit2') {
+      const t = args[0] as { id: Hex; payer: Hex; merchant: Hex; amount: bigint };
+      return { contract: 'escrow', paymentId: String(t.id), name: 'Charged', args: { id: t.id, merchant: t.merchant, payer: t.payer, amount: t.amount } };
+    }
     const id = String(args[0]);
     const common = { contract: 'escrow' as const, paymentId: id };
     if (name === 'charge' || name === 'chargeInvoice' || name === 'authorize') return { ...common, name: name === 'authorize' ? 'Authorized' : 'Charged', args: { id, merchant: args[1], payer: request.intent.signer, amount: args[2] } };
@@ -47,25 +54,79 @@ export function initFinancedPayments(db: Db) {
   db.exec('CREATE TABLE IF NOT EXISTS financed_payments(payment_id TEXT PRIMARY KEY, claim_id TEXT NOT NULL, to_holders_minor TEXT NOT NULL, to_merchant_minor TEXT NOT NULL)');
 }
 function is429(error: unknown) { return /429|rate.limit|too many requests/i.test(String(error)); }
+/** The RPC refused the block range (Whitechain Sepolia allows 10,000 blocks per eth_getLogs, mainnet 100,000). */
+function isRangeLimit(error: unknown) { return /block range|range (is )?too (large|wide)|exceeds max|limit exceeded|query returned more than/i.test(String(error)); }
+const RECEIPT_CONCURRENCY = 16;
+/** The finality stage a ledger entry written at each `PACT_FINALITY` setting has reached. */
+const STAGE: Record<Finality, 'confirmed' | 'settled' | 'final'> = { latest: 'confirmed', safe: 'settled', finalized: 'final' };
+/** Payments promoted to final (and block hashes rechecked) per poll, so a backlog cannot stall indexing. */
+const FINAL_BATCH = 200;
+export function finalityConfig(env: NodeJS.ProcessEnv = process.env): Finality {
+  const value = env.PACT_FINALITY ?? 'latest';
+  if (value !== 'latest' && value !== 'safe' && value !== 'finalized') throw new Error('PACT_FINALITY must be latest, safe or finalized');
+  return value;
+}
 export class Indexer {
-  constructor(private db: Db, private chain: ChainAdapter, private startBlock = 0n, private confirmations = 2n) {
+  /** Blocks per log query: starts at `INDEXER_LOG_WINDOW` (default 2,000), halves whenever the RPC refuses a range. */
+  private window = BigInt(process.env.INDEXER_LOG_WINDOW ?? '2000');
+  /** Every relayer account whose journal this indexer resolves: the primary, then any lanes. */
+  readonly writers: AccountWriter[];
+  /**
+   * `finality` decides where the ledger is written (accounting, captured status, `payment.captured`):
+   * `latest` (the sequencer's block, less `confirmations`), `safe` or `finalized`. Whatever it is, a charge in
+   * a sequencer block is reported `confirmed` at once, and every settled payment is promoted to `final` only
+   * after its block hash is checked against the finalized chain.
+   */
+  constructor(private db: Db, private chain: ChainAdapter, private startBlock = 0n, private confirmations = 2n, private finality: Finality = 'latest') {
     initFinancedPayments(db);
+    if (this.window < 1n) this.window = 1n;
+    this.writers = [chain.writer];
   }
   async poll() {
-    await this.chain.writer.reconcile(this.chain, this.confirmations);
+    const clock = stopwatch('indexer.poll');
     if (await this.chain.chainId() !== 1874) throw new Error('Wrong chain');
     const latest = await this.chain.latestBlock();
+    clock.lap('head');
+    // One receipt read per transaction per poll, shared by the journal and the indexer, fetched in parallel.
+    const memo = new Map<string, Promise<ChainReceipt | null>>();
+    const receipt = (hash: Hex) => {
+      const key = hash.toLowerCase();
+      let read = memo.get(key);
+      // A failed read stays failed for the rest of this poll (uncertainty, retried next poll), never re-read.
+      if (!read) { read = this.chain.receipt(hash); memo.set(key, read); read.catch(() => undefined); }
+      return read;
+    };
+    // Every receipt this poll needs, fetched at once (bounded) together with the finality heads: the journals
+    // then reconcile from memory instead of one RPC round trip per in-flight transaction.
+    const wanted = new Set<string>(this.pendingHashes());
+    for (const writer of this.writers) for (const row of writer.inFlight()) wanted.add(row.tx_hash!.toLowerCase());
+    const prefetch = async () => {
+      const all = [...wanted] as Hex[];
+      for (let i = 0; i < all.length; i += RECEIPT_CONCURRENCY) await Promise.allSettled(all.slice(i, i + RECEIPT_CONCURRENCY).map(receipt));
+    };
+    const [heads] = await Promise.all([this.chain.finalityHeads(), prefetch()]);
+    clock.lap(`receipts(${wanted.size})`);
     if (latest < this.confirmations) return 0;
-    const safe = latest - this.confirmations;
+    // The ledger head: never past the confirmation depth, and never past the configured finality tag.
+    const depth = latest - this.confirmations;
+    const tagged = this.finality === 'safe' ? heads.safe : this.finality === 'finalized' ? heads.finalized : depth;
+    const safe = tagged < depth ? tagged : depth;
+    // The journal resolves a transaction at the same head as the ledger: until then it stays unsettled, so if a
+    // reorg drops it the watchdog still resends its signed bytes.
+    for (const writer of this.writers) await writer.reconcile({ chainId: async () => 1874, latestBlock: async () => safe + 1n, receipt }, 1n);
     const row = this.db.prepare("SELECT block_number FROM cursor WHERE name='settle'").get() as { block_number: string } | undefined;
     let from = row ? BigInt(row.block_number) + 1n : this.startBlock;
     let count = 0;
     while (from <= safe) {
-      const to = from + 99n < safe ? from + 99n : safe;
+      let to = from + this.window - 1n < safe ? from + this.window - 1n : safe;
       let logs: ChainEvent[] | undefined;
-      for (let retry = 0; retry < 5; retry++) {
+      for (let retry = 0; retry < 8; retry++) {
         try { logs = await this.chain.events(from, to); break; }
-        catch (e) { if (!is429(e) || retry === 4) throw e; await new Promise(r => setTimeout(r, 250 * 2 ** retry)); }
+        catch (e) {
+          if (isRangeLimit(e) && this.window > 1n) { this.window /= 2n; to = from + this.window - 1n < safe ? from + this.window - 1n : safe; continue; }
+          if (!is429(e) || retry === 7) throw e;
+          await new Promise(r => setTimeout(r, 250 * 2 ** Math.min(retry, 4)));
+        }
       }
       const pending = new Set<string>(this.pendingHashes());
       this.db.transaction(() => {
@@ -82,7 +143,86 @@ export class Indexer {
       })();
       from = to + 1n;
     }
-    return count + await this.reconcile(safe);
+    clock.lap('logs');
+    count += await this.reconcile(safe, receipt);
+    clock.lap('settle');
+    await this.promote(heads);
+    clock.lap('promote'); clock.done();
+    return count;
+  }
+  /** The finality stage at `block`, given the heads. */
+  private stageAt(block: bigint, heads: FinalityHeads) { return block <= heads.finalized ? 'final' : block <= heads.safe ? 'settled' : 'confirmed'; }
+  /**
+   * Fast path: a charge whose transaction is in a sequencer block, with the expected payment event, is
+   * `confirmed` now (`payment.confirmed`), long before the ledger head reaches it. No ledger entry.
+   */
+  private confirm(hash: Hex, receipt: ChainReceipt) {
+    if (receipt.status !== 'success') return;
+    this.db.transaction(() => {
+      const intents = this.db.prepare("SELECT * FROM intents WHERE lower(tx_hash)=? AND status IN ('submitted','reconciliation_required')").all(hash) as Row[];
+      for (const intent of intents) {
+        let request: IntentRequest;
+        try { request = JSON.parse(intent.request_json) as IntentRequest; } catch { continue; }
+        const expected = expectedEvent(request);
+        if (!expected?.paymentId || !['Charged', 'Authorized', 'Paid'].includes(expected.name)) continue;
+        const events = receipt.events.filter(event => same(event.txHash, hash));
+        const executed = (request as { kind?: string }).kind === 'collector' || events.find(event => matches(event, 'router', 'Executed', { signer: request.intent.signer, merchant: request.intent.merchant, nonce: request.intent.nonce, target: request.intent.target }));
+        const target = events.find(event => matches(event, expected.contract, expected.name, expected.args));
+        if (!executed || !target) continue;
+        const before = this.db.prepare('SELECT finality FROM payments WHERE id=? AND merchant_id=?').get(expected.paymentId, intent.merchant_id) as { finality: string | null } | undefined;
+        if (!before) continue;
+        // Also follows a re-inclusion in another block; only the move from unconfirmed notifies the merchant.
+        const moved = this.db.prepare(`UPDATE payments SET finality='confirmed',finality_tx_hash=?,finality_block=?,finality_block_hash=?
+          WHERE id=? AND merchant_id=? AND captured_minor='0' AND status IN ('open','failed','reconciliation_required') AND (finality IS NULL OR (finality='confirmed' AND (lower(finality_tx_hash)!=lower(?) OR finality_block!=?)))`)
+          .run(hash, receipt.block.toString(), receipt.blockHash ?? null, expected.paymentId, intent.merchant_id, hash, receipt.block.toString());
+        if (moved.changes && !before.finality)
+          enqueueWebhook(this.db, intent.merchant_id, 'payment.confirmed', expected.paymentId, { tx_hash: hash, block_number: receipt.block.toString(), finality: 'confirmed', amount_minor: String(request.intent.amount) });
+      }
+    })();
+  }
+  /** A confirmed charge whose transaction left the chain (a sequencer reorg) before it settled: withdraw it. */
+  private unconfirm(hash: Hex) {
+    const rows = this.db.prepare("SELECT id,merchant_id FROM payments WHERE lower(finality_tx_hash)=? AND finality='confirmed' AND captured_minor='0' AND status IN ('open','failed','reconciliation_required')").all(hash) as Row[];
+    for (const p of rows) this.db.transaction(() => {
+      this.db.prepare("UPDATE payments SET finality=NULL,finality_tx_hash=NULL,finality_block=NULL,finality_block_hash=NULL WHERE id=? AND finality='confirmed' AND captured_minor='0'").run(p.id);
+      enqueueWebhook(this.db, p.merchant_id, 'payment.confirmation_reverted', p.id, { tx_hash: hash, reason: 'transaction_left_chain' });
+    })();
+  }
+  /**
+   * Settled payments move to `settled` once their block is at or below the safe head and to `final` once it is
+   * finalized, the latter only if the block they were recorded in is still the canonical block at that height.
+   * A different hash there means the chain reorganized under a written ledger entry: it is flagged, never kept quietly.
+   */
+  private async promote(heads: FinalityHeads) {
+    const rows = this.db.prepare(`SELECT id,merchant_id,finality,finality_tx_hash,finality_block,finality_block_hash FROM payments
+      WHERE finality IN ('confirmed','settled') AND finality_block IS NOT NULL AND (CAST(captured_minor AS INTEGER) > 0 OR status IN ('authorized','voided'))
+      ORDER BY CAST(finality_block AS INTEGER) LIMIT ?`).all(FINAL_BATCH) as Row[];
+    const hashes = new Map<string, Promise<Hex | null>>();
+    for (const p of rows) {
+      if (!p.finality_block) continue;
+      const block = BigInt(p.finality_block);
+      const stage = this.stageAt(block, heads);
+      if (stage === 'confirmed' || stage === p.finality) continue;
+      if (stage === 'settled') { this.db.prepare("UPDATE payments SET finality='settled' WHERE id=? AND finality='confirmed'").run(p.id); continue; }
+      let canonical: Hex | null;
+      try {
+        let read = hashes.get(p.finality_block);
+        if (!read) { read = this.chain.blockHash(block); hashes.set(p.finality_block, read); }
+        canonical = await read;
+      } catch { continue; } // RPC failure is uncertainty: try again next poll.
+      if (canonical === null) continue;
+      if (p.finality_block_hash && !same(canonical, p.finality_block_hash)) {
+        this.db.transaction(() => {
+          this.db.prepare("UPDATE payments SET finality='reorged' WHERE id=?").run(p.id);
+          this.note(p.merchant_id, p.id, (p.finality_tx_hash ?? `0x${'0'.repeat(64)}`) as Hex, 'reorged_after_settlement');
+        })();
+        continue;
+      }
+      this.db.transaction(() => {
+        const moved = this.db.prepare("UPDATE payments SET finality='final' WHERE id=? AND finality IN ('confirmed','settled')").run(p.id);
+        if (moved.changes) enqueueWebhook(this.db, p.merchant_id, 'payment.finalized', p.id, { tx_hash: p.finality_tx_hash, block_number: p.finality_block, finality: 'final' });
+      })();
+    }
   }
   private pendingHashes(): Hex[] {
     return (this.db.prepare(`SELECT lower(tx_hash) AS hash FROM intents WHERE status IN ('submitted','reconciliation_required') AND tx_hash IS NOT NULL
@@ -100,13 +240,22 @@ export class Indexer {
     this.db.prepare('INSERT INTO chain_events VALUES (?,?,?,?)').run(event.id, event.block.toString(), event.txHash, now());
     return 1;
   }
-  private async reconcile(safe: bigint): Promise<number> {
+  private async reconcile(safe: bigint, read: (hash: Hex) => Promise<ChainReceipt | null> = hash => this.chain.receipt(hash)): Promise<number> {
     let count = 0;
-    for (const hash of this.pendingHashes()) {
-      let receipt;
-      try { receipt = await this.chain.receipt(hash); }
-      catch { continue; } // RPC failure is uncertainty, never proof of failure.
-      if (!receipt || !same(receipt.txHash, hash) || receipt.block > safe) continue;
+    const hashes = this.pendingHashes();
+    // Fetch every pending receipt first (bounded concurrency), then settle them one by one in order.
+    const fetched = new Map<string, ChainReceipt | null | undefined>();
+    for (let i = 0; i < hashes.length; i += RECEIPT_CONCURRENCY) {
+      const batch = hashes.slice(i, i + RECEIPT_CONCURRENCY);
+      const results = await Promise.allSettled(batch.map(hash => read(hash)));
+      results.forEach((result, j) => fetched.set(batch[j], result.status === 'fulfilled' ? result.value : undefined));
+    }
+    for (const hash of hashes) {
+      const receipt = fetched.get(hash);
+      if (receipt === undefined) continue; // RPC failure is uncertainty, never proof of failure.
+      if (receipt === null) { this.unconfirm(hash); continue; }
+      if (!same(receipt.txHash, hash)) continue;
+      if (receipt.block > safe) { this.confirm(hash, receipt); continue; }
       if (receipt.status !== 'success' && receipt.status !== 'reverted') continue;
       const events = receipt.events.filter(event => same(event.txHash, hash) && event.block === receipt.block);
       this.db.transaction(() => {
@@ -124,7 +273,9 @@ export class Indexer {
           const objectId = refunds[0]?.payment_id ?? expected?.paymentId ?? intent.id;
           const identity = request && { signer: request.intent.signer, merchant: request.intent.merchant, nonce: request.intent.nonce };
           const refused = identity && events.find(event => matches(event, 'router', 'Refused', identity));
-          const executed = identity && events.find(event => matches(event, 'router', 'Executed', { ...identity, target: request!.intent.target }));
+          // A one-signature charge goes straight to the escrow: there is no Router event to match.
+          const direct = (request as { kind?: string } | undefined)?.kind === 'collector';
+          const executed = direct || (identity && events.find(event => matches(event, 'router', 'Executed', { ...identity, target: request!.intent.target })));
           const target = expected && events.find(event => matches(event, expected.contract, expected.name, expected.args));
           const replacement = this.db.prepare('SELECT * FROM subscription_replacements WHERE intent_id=?').get(intent.id) as { old_id: string; new_id: string } | undefined;
           const replacementEvents: ChainEvent[] = [];
@@ -150,7 +301,7 @@ export class Indexer {
           if (receipt.status === 'success' && executed && target && (expected!.name !== 'Replaced' || replacementEvents.length === 2)) {
             for (const event of replacementEvents) count += this.recordEvent(event);
             count += this.recordEvent(target);
-            count += this.recordEvent(executed);
+            if (typeof executed === 'object') count += this.recordEvent(executed);
             this.db.prepare("UPDATE intents SET status='confirmed',reason=NULL WHERE id=?").run(intent.id);
             if (expected!.name === 'Refunded') this.db.prepare("UPDATE refunds SET status='succeeded' WHERE lower(tx_hash)=? AND payment_id=? AND amount_minor=? AND status='pending'").run(hash, String(expected!.args.id), String(expected!.args.amount));
             continue;
@@ -217,6 +368,22 @@ export class Indexer {
     }
     return count;
   }
+  /**
+   * The ledger reached this payment: record the stage it is at and the block it was written from. A payment
+   * that skipped the fast path (seen first in the log scan) is reported `confirmed` here, so every payment
+   * sends payment.confirmed before payment.captured.
+   */
+  private settled(paymentId: string, merchantId: string, e: ChainEvent) {
+    const previous = this.db.prepare('SELECT finality FROM payments WHERE id=?').get(paymentId) as { finality: string | null } | undefined;
+    const stage = STAGE[this.finality];
+    this.db.prepare('UPDATE payments SET finality=?,finality_tx_hash=?,finality_block=?,finality_block_hash=COALESCE(?,finality_block_hash) WHERE id=?')
+      .run(stage, e.txHash, e.block.toString(), e.blockHash ?? null, paymentId);
+    if (!previous?.finality) enqueueWebhook(this.db, merchantId, 'payment.confirmed', paymentId, { tx_hash: e.txHash, block_number: e.block.toString(), finality: 'confirmed' });
+  }
+  /** After payment.captured: a ledger written at the finalized head is final at once. */
+  private finalAtOnce(paymentId: string, merchantId: string, e: ChainEvent) {
+    if (STAGE[this.finality] === 'final') enqueueWebhook(this.db, merchantId, 'payment.finalized', paymentId, { tx_hash: e.txHash, block_number: e.block.toString(), finality: 'final' });
+  }
   /** A financed invoice's payment, settled by the receivables contract: the invoice is paid as with an escrow charge. */
   private applyFinancedPayment(e: ChainEvent, context: Record<string, unknown>) {
     const args = e.args;
@@ -231,10 +398,12 @@ export class Indexer {
     recordAccounting(this.db, e);
     // No refund window: the money went to the claim holders, not into an escrow payment.
     this.db.prepare("UPDATE payments SET status='captured',captured_minor=?,tx_hash=?,payer=COALESCE(payer,?),refund_deadline=NULL WHERE id=?").run(amount.toString(), e.txHash, String(args.payer).toLowerCase(), paymentId);
+    this.settled(paymentId, p.merchant_id, e);
     this.db.prepare('INSERT OR IGNORE INTO financed_payments VALUES (?,?,?,?)').run(paymentId, String(args.claimId), String(args.toHolders ?? 0), String(args.toMerchant ?? 0));
     const metadata = storedMetadata(p.custom_metadata);
     const fee = BigInt(String(args.fee ?? 0));
     enqueueWebhook(this.db, p.merchant_id, 'payment.captured', paymentId, { ...context, amount_minor: amount.toString(), fee_minor: fee.toString(), net_minor: (amount - fee).toString(), metadata, data: { amount: amountString(amount), fee: amountString(fee), net: amountString(amount - fee), currency: 'USDT', customer: p.customer ?? null, tx_hash: e.txHash, metadata, financed: true } });
+    this.finalAtOnce(paymentId, p.merchant_id, e);
     const invoiceId = (JSON.parse(p.metadata ?? '{}') as { invoiceId?: string }).invoiceId;
     if (!invoiceId) return;
     const invoice = this.db.prepare('SELECT * FROM invoices WHERE id=? AND merchant_id=?').get(invoiceId, p.merchant_id) as Record<string, string> | undefined;
@@ -273,15 +442,18 @@ export class Indexer {
           .run(objectId, e.paymentTerms.refundWindowSeconds, e.paymentTerms.refundDeadlineUnix);
         this.db.prepare('UPDATE payments SET refund_deadline=? WHERE id=?').run(deadlineIso(e.paymentTerms.refundDeadlineUnix), objectId);
       }
-      if (e.name === 'Authorized') this.db.prepare("UPDATE payments SET status='authorized',tx_hash=? WHERE id=?").run(e.txHash, objectId);
+      if (e.name === 'Authorized') { this.db.prepare("UPDATE payments SET status='authorized',tx_hash=? WHERE id=?").run(e.txHash, objectId); this.settled(objectId, p.merchant_id, e); this.finalAtOnce(objectId, p.merchant_id, e); }
       if (e.name === 'Captured' || e.name === 'Charged') {
         const captured = BigInt(p.captured_minor) + BigInt(String(args.amount));
-        this.db.prepare("UPDATE payments SET status='captured',captured_minor=?,tx_hash=?,payer=COALESCE(?,payer) WHERE id=?").run(captured.toString(), e.txHash, args.payer ?? null, objectId);
+        // Addresses are stored lowercase everywhere; decoded event addresses arrive checksummed.
+        this.db.prepare("UPDATE payments SET status='captured',captured_minor=?,tx_hash=?,payer=COALESCE(?,payer) WHERE id=?").run(captured.toString(), e.txHash, args.payer === undefined ? null : String(args.payer).toLowerCase(), objectId);
+        if (e.name === 'Charged' || !p.finality) this.settled(objectId, p.merchant_id, e);
         const metadata = storedMetadata(p.custom_metadata);
         // Pact's fee came out of this payment: the merchant received the net.
         const fee = BigInt(String(args.fee ?? 0));
         paidContext = { ...context, amount_minor: String(args.amount), fee_minor: fee.toString(), net_minor: (BigInt(String(args.amount)) - fee).toString(), metadata, data: { amount: amountString(String(args.amount)), fee: amountString(fee), net: amountString(BigInt(String(args.amount)) - fee), currency: 'USDT', customer: p.customer ?? null, tx_hash: e.txHash, metadata } };
         enqueueWebhook(this.db, p.merchant_id, 'payment.captured', objectId, paidContext);
+        if (e.name === 'Charged' || !p.finality) this.finalAtOnce(objectId, p.merchant_id, e);
         const invoiceId = (JSON.parse(p.metadata ?? '{}') as { invoiceId?: string }).invoiceId;
         if (invoiceId) {
           const invoice = this.db.prepare('SELECT * FROM invoices WHERE id=? AND merchant_id=?').get(invoiceId, p.merchant_id) as Record<string, string> | undefined;
@@ -322,14 +494,16 @@ export class Indexer {
       if (e.name === 'Charged') {
         const plan = this.db.prepare('SELECT period_seconds,amount_minor FROM plans WHERE id=?').get(s.plan_id) as { period_seconds: number; amount_minor: string } | undefined;
         if (!e.timestamp || !Number.isFinite(Date.parse(e.timestamp))) throw new Error('Subscription event requires confirmed block time');
+        // The v3 manager states the next renewal time; older events derive it from the block time.
+        const next = e.args.nextChargeAt !== undefined ? new Date(Number(e.args.nextChargeAt) * 1000) : new Date(Date.parse(e.timestamp) + Number(plan?.period_seconds ?? 0) * 1000);
         this.db.prepare("UPDATE subscriptions SET status=CASE WHEN status='cancelled' THEN status ELSE 'active' END,retry_count=0,pending_tx_hash=NULL,next_charge_at=? WHERE id=?")
-          .run(new Date(Date.parse(e.timestamp) + Number(plan?.period_seconds ?? 0) * 1000).toISOString(), s.id);
+          .run(next.toISOString(), s.id);
         this.db.prepare('DELETE FROM subscription_service_backoff WHERE subscription_id=?').run(s.id);
         enqueueWebhook(this.db, s.merchant_id, 'subscription.renewed', s.id, { ...context, ...discountView(plan?.amount_minor ?? null, plan ? (BigInt(plan.amount_minor) - BigInt(String(args.amount))).toString() : null, s.discount_code ?? null), amountChargedMinor: String(args.amount) });
       }
       if (e.name === 'Refused') {
         const code = Number(args.reason);
-        const reason = ['cancelled','expired','too_early','cap_exceeded','max_periods','insufficient_funds','transfer_failed','fee_unavailable'][code] ?? String(args.reason);
+        const reason = ['cancelled','expired','too_early','cap_exceeded','max_periods','insufficient_funds','transfer_failed','fee_unavailable','not_authorized','unknown_subscription'][code] ?? String(args.reason);
         this.db.prepare('INSERT INTO refusal_attempts (id,merchant_id,object_id,reason,tx_hash,created_at,source) VALUES (?,?,?,?,?,?,?)').run(id('refusal'), s.merchant_id, s.id, reason, e.txHash, e.timestamp ?? now(), 'contract');
         this.db.prepare('UPDATE subscriptions SET pending_tx_hash=NULL WHERE id=?').run(s.id);
         enqueueWebhook(this.db, s.merchant_id, 'subscription.refused', s.id, { ...context, reason });
@@ -343,7 +517,9 @@ export class Indexer {
             this.db.prepare('UPDATE subscriptions SET status=?,retry_count=?,next_charge_at=? WHERE id=?')
               .run(retry >= 3 ? 'paused' : 'past_due', retry, next, s.id);
             enqueueWebhook(this.db, s.merchant_id, 'subscription.past_due', s.id, { ...context, retry, next_retry_at: retry >= 3 ? null : next });
-          } else if (code === 2) {
+          } else if (code === 2 || code === 8 || code === 9) {
+            // too_early, or a service-side problem (not_authorized: the keeper or merchant did not match;
+            // unknown_subscription): not the payer's doing, so back off without changing the subscription.
             // A too-early call does not invalidate an active mandate. Back off
             // separately without shifting the confirmed billing schedule.
             this.db.prepare('INSERT INTO subscription_service_backoff VALUES (?,?) ON CONFLICT(subscription_id) DO UPDATE SET next_attempt_at=excluded.next_attempt_at')

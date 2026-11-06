@@ -48,7 +48,16 @@ const env: Record<string, string> = {
   SUBSCRIPTION_ADDRESS: deployment.contracts.subscription,
   FEE_SCHEDULE_ADDRESS: deployment.contracts.fees,
   DEPLOYMENT_BLOCK: deployment.deploymentBlock,
-  CONFIRMATIONS: '2',
+  CONFIRMATIONS: '1',
+  // New heads over WebSocket: index and reconcile as each block lands (Whitechain serves /ws on the RPC host).
+  RPC_WS_URL: args.rpc!.replace(/^http/, 'ws').replace(/\/?$/, '/ws'),
+  // Where the ledger is written. Testnet demos: latest (the sequencer's block). Real money: safe or finalized.
+  PACT_FINALITY: process.env.PACT_FINALITY ?? 'latest',
+  // Passkey accounts (P-256, RIP-7212) and the Permit2 they pay through, when the record has them.
+  ...(deployment.contracts.passkeyFactory ? { PASSKEY_FACTORY_ADDRESS: deployment.contracts.passkeyFactory } : {}),
+  ...(deployment.contracts.permit2 ? { PERMIT2_ADDRESS: deployment.contracts.permit2 } : {}),
+  // Optional extra relayer keys for Router intents (comma-separated); each needs WBT for gas.
+  ...(process.env.RELAYER_LANE_KEYS ? { RELAYER_LANE_KEYS: process.env.RELAYER_LANE_KEYS } : {}),
   RELAYER_MIN_AMOUNT_MINOR: deployment.routerLimits.minAmount,
   // About 25 sponsored calls a minute in total, and 8 per merchant, at Whitechain's 5 gwei floor.
   RELAYER_MAX_SPEND_PER_MINUTE_WEI: '100000000000000000',

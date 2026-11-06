@@ -1,3 +1,4 @@
+import { nextRouterNonce } from '../write-reservations.js';
 import { randomBytes } from 'node:crypto';
 import type { Context, Hono } from 'hono';
 import { decodeFunctionData, encodeFunctionData, hashTypedData, keccak256, recoverTypedDataAddress, type Address, type Hex } from 'viem';
@@ -16,6 +17,7 @@ import { enqueueWebhook } from '../webhooks.js';
 
 export interface HostedPaymentServices {
   db: Db; approval: ApprovalService; relayer: Relayer; router: Address; escrow: Address; baseUrl: string;
+  collector?: import('./routes.js').CollectorServices;
   submitIntent: (body: Record<string, unknown>, auth: { merchantId: string; address: Address }) => Promise<unknown>;
   /** Invoice financing: a financed invoice's payment goes to the receivables contract, which pays the investors. */
   financing?: FinancingService;
@@ -91,7 +93,8 @@ export function mountHostedPayments(app: Hono, s: HostedPaymentServices, payer: 
     const user = await payer(c), p = myPayment(user, c.req.param('id'));
     const metadata = JSON.parse(String(p.metadata ?? '{}')) as { invoiceId?: string; linkId?: string; discountCode?: string | null; amountGrossMinor?: string; amountDiscountMinor?: string };
     const brand = checkoutSettings(db, String(p.merchant_id));
-    return c.json({ id: p.id, amountMinor: p.amount_minor, description: p.description, status: p.status, txHash: p.tx_hash, createdAt: p.created_at, expiresAt: p.expires_at, invoiceId: metadata.invoiceId ?? null, ...(metadata.linkId ? discountView(metadata.amountGrossMinor ?? null, metadata.amountDiscountMinor ?? null, metadata.discountCode ?? null) : {}), brand: { brandName: brand.brandName, logoUrl: brand.logoUrl }, merchant: merchantAddress(String(p.merchant_id)) });
+    // A charge in a sequencer block is paid for the payer; `finality` says how settled it is.
+    return c.json({ id: p.id, amountMinor: p.amount_minor, description: p.description, status: p.status === 'open' && p.finality === 'confirmed' ? 'captured' : p.status, finality: p.finality ?? null, txHash: p.tx_hash ?? p.finality_tx_hash ?? null, createdAt: p.created_at, expiresAt: p.expires_at, invoiceId: metadata.invoiceId ?? null, ...(metadata.linkId ? discountView(metadata.amountGrossMinor ?? null, metadata.amountDiscountMinor ?? null, metadata.discountCode ?? null) : {}), brand: { brandName: brand.brandName, logoUrl: brand.logoUrl }, merchant: merchantAddress(String(p.merchant_id)) });
   });
   app.get('/me/payments/:id/readiness', async c => {
     const user = await payer(c), p = myPayment(user, c.req.param('id'));
@@ -105,6 +108,7 @@ export function mountHostedPayments(app: Hono, s: HostedPaymentServices, payer: 
     const user = await payer(c), p = myPayment(user, c.req.param('id'));
     const readiness = await s.approval.get(String(p.id), String(p.merchant_id), user.wallet.address);
     if (readiness.status !== 'ready') return bad('payment_not_ready', 409);
+    if (s.collector && await s.collector.ready(String(p.id))) return c.json(await s.collector.offer(String(p.id), String(p.merchant_id), user.wallet.address));
     const merchant = merchantAddress(String(p.merchant_id));
     const invoiceId = (JSON.parse(String(p.metadata ?? '{}')) as { invoiceId?: string }).invoiceId;
     // While an invoice is financed its payment goes to the receivables contract, never the escrow.
@@ -116,7 +120,7 @@ export function mountHostedPayments(app: Hono, s: HostedPaymentServices, payer: 
       : encodeFunctionData({ abi: escrowAbi, functionName: invoiceId ? 'chargeInvoice' : 'charge', args: [p.id as Hex, merchant, amount, BigInt(paymentRefundWindow(db, String(p.id))!)] });
     if (route) s.financing!.checkPayment(route.claimId, amount, user.wallet.address as Address);
     const quote = await s.relayer.quote(route ? s.financing!.paymentGas(route.holders) : undefined);
-    const intent = { signer: user.wallet.address, merchant, target: route ? s.financing!.addresses.receivables : s.escrow, dataHash: keccak256(data), amount, nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
+    const intent = { signer: user.wallet.address, merchant, target: route ? s.financing!.addresses.receivables : s.escrow, dataHash: keccak256(data), amount, nonce: nextRouterNonce(db, user.wallet.address), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
     // Remember how long this charge stays signable, so an abandoned attempt is released only after that.
     db.prepare('INSERT INTO hosted_intent_offers VALUES (?,?) ON CONFLICT(payment_id) DO UPDATE SET deadline=max(deadline,excluded.deadline)').run(p.id, Number(intent.deadline));
     return c.json(json({ data, intent, typedData: intentTypedData(intent, s.router) }));
@@ -124,6 +128,10 @@ export function mountHostedPayments(app: Hono, s: HostedPaymentServices, payer: 
   app.post('/me/payments/:id/intent', async c => {
     const user = await payer(c), p = myPayment(user, c.req.param('id')), b = await body(c);
     const i = b.intent as Record<string, unknown> | undefined;
+    if (i?.kind === 'authorization') {
+      if (!s.collector || String((i.terms as { id?: string } | undefined)?.id).toLowerCase() !== String(p.id).toLowerCase()) return bad('intent_mismatch');
+      return c.json(await s.collector.submit(b, { merchantId: String(p.merchant_id), address: merchantAddress(String(p.merchant_id)) }, user.wallet.address as Address));
+    }
     const receivables = s.financing?.addresses.receivables;
     if (!i || String(i.signer).toLowerCase() !== user.wallet.address.toLowerCase()) return bad('intent_mismatch');
     if (receivables && String(i.target).toLowerCase() === receivables.toLowerCase()) {

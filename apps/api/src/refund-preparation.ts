@@ -1,3 +1,4 @@
+import { nextRouterNonce } from './write-reservations.js';
 import { randomBytes } from 'node:crypto';
 import { encodeFunctionData, keccak256, type Address, type Hex } from 'viem';
 import { amountMinor, amountString, type Db } from './db.js';
@@ -24,6 +25,6 @@ export async function prepareRefund(db: Db, relayer: Relayer, router: Address, e
   if (closed) throw new IdentityError('refund_window_closed', 409);
   const data = encodeFunctionData({ abi: escrowAbi, functionName: 'refund', args: [paymentId as Hex, amount, keccak256(new TextEncoder().encode(body.reason))] });
   const quote = await relayer.quote();
-  const intent = { signer: auth.address, merchant: auth.address, target: escrow, dataHash: keccak256(data), amount, nonce: BigInt(`0x${randomBytes(32).toString('hex')}`), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
+  const intent = { signer: auth.address, merchant: auth.address, target: escrow, dataHash: keccak256(data), amount, nonce: nextRouterNonce(db, auth.address), deadline: BigInt(Math.floor(Date.now() / 1000) + 300), maxGas: quote.targetGas };
   return JSON.parse(JSON.stringify({ data, intent, typedData: intentTypedData(intent, router), amount: amountString(amount), reason: body.reason, paymentId }, (_, v) => typeof v === 'bigint' ? v.toString() : v));
 }

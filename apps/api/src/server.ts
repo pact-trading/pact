@@ -6,7 +6,10 @@ import { createLiveX402, type LiveX402 } from './x402/live.js';
 import { AgentService } from './agents.js';
 import { startOwnedRelayer } from './runtime-ownership.js';
 import { ApprovalService, approvalConfig } from './approval.js';
-import { startBackgroundJobs } from './background.js';
+import { startBackgroundJobs, type BackgroundJobs } from './background.js';
+// Passkeys track.
+import { viemPasskeyChain } from './passkeys/chain.js';
+import { PERMIT2 } from './x402/constants.js';
 import { serve } from '@hono/node-server';
 import { openDb, seedMerchant } from './db.js';
 import { FakeChain, ViemChain, type Addresses } from './chain.js';
@@ -14,7 +17,9 @@ import { ViemFinancingChain } from './financing/chain.js';
 import { FinancingService } from './financing/service.js';
 import { Relayer, allowedTargets } from './relayer.js';
 import { createApp } from './app.js';
-import { Indexer } from './indexer.js';
+import { Indexer, finalityConfig } from './indexer.js';
+import { LedgerReconciler } from './ledger-reconciler.js';
+import { RelayerWatchdog } from './relayer-watchdog.js';
 import { runKeeper } from './keeper.js';
 import { KeeperRenewals } from './subscriptions-live.js';
 import { SponsorshipBudget, sponsorshipLimits } from './sponsorship.js';
@@ -48,10 +53,19 @@ await startOwnedRelayer({ chainId: chain.writer.chainId, relayer: chain.writer.r
     const keys = seedMerchant(db, process.env.BOOTSTRAP_MERCHANT_ADDRESS);
     console.info('Bootstrap keys (shown once):', keys);
   }
+  // RELAYER_LANE_KEYS: extra relayer keys for Router intents. Each is locked to this process like the primary.
+  const laneKeys = live ? (process.env.RELAYER_LANE_KEYS ?? '').split(',').map(k => k.trim()).filter(Boolean) as Hex[] : [];
+  const lanes = [];
+  for (const key of laneKeys) {
+    const lane = (chain as ViemChain).lane(key);
+    await startOwnedRelayer({ chainId: lane.writer.chainId, relayer: lane.writer.relayer }, () => undefined);
+    lanes.push(lane);
+  }
   const relayer = new Relayer(chain, addresses.router ?? '0x0000000000000000000000000000000000000001', allowedTargets({ escrow: addresses.escrow ?? '0x0000000000000000000000000000000000000002', subscription: addresses.subscription ?? '0x0000000000000000000000000000000000000003', receivables: live ? financingAddresses?.receivables : undefined }), { minAmount: BigInt(process.env.RELAYER_MIN_AMOUNT_MINOR ?? '1000000'), maxGas: 1_000_000n, maxGasPrice: 100_000_000_000n,
     // Global ceiling for the one relayer, and a lower one per merchant so testers do not block each other.
     maxSpendPerMinute: BigInt(process.env.RELAYER_MAX_SPEND_PER_MINUTE_WEI ?? '10000000000000000'),
     maxSpendPerMerchantPerMinute: BigInt(process.env.RELAYER_MAX_SPEND_PER_MERCHANT_PER_MINUTE_WEI ?? process.env.RELAYER_MAX_SPEND_PER_MINUTE_WEI ?? '10000000000000000') });
+  relayer.lanes = lanes;
   const approval = new ApprovalService(db, chain, approvalConfig(process.env, addresses.escrow ?? '0x0000000000000000000000000000000000000002', relayer.minimumAmount));
   // The gas Pact absorbs on calls that move no money to a merchant, per merchant per day.
   const sponsorship = new SponsorshipBudget(db, sponsorshipLimits(process.env));
@@ -86,18 +100,34 @@ await startOwnedRelayer({ chainId: chain.writer.chainId, relayer: chain.writer.r
     })
     : undefined;
   const registryOwner = faucet && process.env.INVESTOR_REGISTRY_OWNER ? process.env.INVESTOR_REGISTRY_OWNER as Address : undefined;
-  const app = createApp({ telegram, renewals, identity, wallet, faucet, agents, x402Live, db, chain, relayer, approval, sponsorship, financing, registryOwner, baseUrl: process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000', router: addresses.router, escrow: addresses.escrow, subscription: addresses.subscription, fees: addresses.fees });
+  // Passkeys track: customer passkey accounts, when the deployment has a PasskeyAccountFactory.
+  const webOrigin = process.env.PACT_WEB_ORIGIN ?? process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000';
+  const passkeys = live && process.env.PASSKEY_FACTORY_ADDRESS
+    ? { chain: viemPasskeyChain(process.env.RPC_URL!, process.env.PASSKEY_FACTORY_ADDRESS as Address), config: { factory: process.env.PASSKEY_FACTORY_ADDRESS as Address, escrow: addresses.escrow, permit2: (process.env.PERMIT2_ADDRESS ?? PERMIT2) as Address, origin: webOrigin, rpId: new URL(webOrigin).hostname } }
+    : undefined;
+  const app = createApp({ passkeys, telegram, renewals, identity, wallet, faucet, agents, x402Live, db, chain, relayer, approval, sponsorship, financing, registryOwner, baseUrl: process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000', router: addresses.router, escrow: addresses.escrow, subscription: addresses.subscription, fees: addresses.fees });
   const http = serve({ fetch: app.fetch, port: Number(process.env.PORT ?? 3001), hostname: process.env.HOST });
   console.info(`Settle API listening on ${process.env.PORT ?? 3001}`);
-  const indexer = new Indexer(db, chain, BigInt(process.env.DEPLOYMENT_BLOCK ?? '0'), confirmations);
+  // PACT_FINALITY: where the ledger is written. `safe` (batch on Ethereum) or `finalized` for real money;
+  // `latest` (the sequencer's block) for demos. Payments are reported `confirmed` within a block either way.
+  const indexer = new Indexer(db, chain, BigInt(process.env.DEPLOYMENT_BLOCK ?? '0'), confirmations, finalityConfig(process.env));
+  indexer.writers.push(...lanes.map(lane => lane.writer));
   const mail = mailSender();
+  const ledger = new LedgerReconciler(db, chain);
+  const watchdogs = [new RelayerWatchdog(chain.writer, chain), ...lanes.map(lane => new RelayerWatchdog(lane.writer, lane))];
   const telegramCall = telegram && telegramClient(telegram.token);
+  let jobs: BackgroundJobs | undefined;
   const stopJobs = startBackgroundJobs([
     { name: 'approval', intervalMs: 1000, run: () => approval.reconcile() },
-    { name: 'indexer', intervalMs: 1000, run: () => indexer.poll() },
+    // Whatever the indexer settled is delivered now, not on the webhook job's next tick.
+    { name: 'indexer', intervalMs: 1000, run: async () => { const settled = await indexer.poll(); if (settled) { jobs?.kick('webhooks'); jobs?.kick('notifications'); } return settled; } },
     { name: 'keeper', intervalMs: 15_000, run: () => runKeeper(db, chain, new Date(), renewals) },
     { name: 'webhooks', intervalMs: 1000, run: () => deliverWebhooks(db) },
     { name: 'notifications', intervalMs: 5000, run: () => deliverNotifications(db, mail) },
+    // Resends lost broadcasts (the exact signed bytes) and stops admitting writes behind a stuck nonce.
+    { name: 'watchdog', intervalMs: 3_000, run: () => Promise.all(watchdogs.map(w => w.run())) },
+    // Clears every finalized ledger entry against the token's own Transfer logs.
+    { name: 'ledger', intervalMs: 30_000, run: () => ledger.run() },
     ...(treasury ? [{ name: 'treasury', intervalMs: 60_000, run: () => treasury.run() }] : []),
     ...(telegramCall ? [
       { name: 'telegram-updates', intervalMs: 3000, run: () => pollTelegram(db, telegramCall) },
@@ -110,6 +140,14 @@ await startOwnedRelayer({ chainId: chain.writer.chainId, relayer: chain.writer.r
       { name: 'financing-keeper', intervalMs: 15_000, run: () => financing.keep() },
     ] : []),
   ], (name, error) => console.error(`Background ${name} failed:`, error));
+  jobs = stopJobs;
+  // New heads over WebSocket (Whitechain: wss://…/ws): index, reconcile receipts and check permits as each
+  // block lands. The timers above stay as the fallback when the subscription drops.
+  const unwatchHeads = live && process.env.RPC_WS_URL
+    // Only the indexer is kicked per head: the other jobs keep their own one-second timers (kicking them too
+    // doubled their RPC use for no gain).
+    ? (chain as ViemChain).watchHeads(process.env.RPC_WS_URL, () => stopJobs.kick('indexer'), error => console.error('Head subscription failed:', error))
+    : undefined;
 
   // Do not release ownership on signal, HTTP close, or timer cancellation. Existing
   // requests/RPCs can still be writing. The kernel lock lasts until process exit.
@@ -118,6 +156,7 @@ await startOwnedRelayer({ chainId: chain.writer.chainId, relayer: chain.writer.r
     if (stopping) return;
     stopping = true;
     stopJobs();
+    unwatchHeads?.();
     http.close();
     // Active I/O drains naturally. A hung operation is recovered from its durable
     // journal after termination; never release the lock while it may still run.
