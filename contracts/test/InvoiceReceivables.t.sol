@@ -3,7 +3,7 @@ pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {GasTank} from "../src/GasTank.sol";
+import {FeeSchedule, IFeeSchedule} from "../src/FeeSchedule.sol";
 import {Router} from "../src/Router.sol";
 import {InvestorRegistry} from "../src/InvestorRegistry.sol";
 import {InvoiceReceivables, IInvestorRegistry} from "../src/InvoiceReceivables.sol";
@@ -35,15 +35,17 @@ contract InvoiceReceivablesTest is Test {
     uint256 constant ALICE_KEY = 0xA1A1;
     uint256 constant BOB_KEY = 0xB0B0;
     uint256 constant OFFICER_KEY = 0x0FF1CE;
+    uint256 constant MERCHANT_KEY = 0xBEEF;
 
     BlockingUSDT token;
-    GasTank tank;
+    FeeSchedule fees;
     Router router;
     InvestorRegistry registry;
     InvoiceReceivables market;
 
     address payer;
-    address merchant = address(0xBEEF);
+    address merchant = vm.addr(MERCHANT_KEY);
+    /// Where every fee goes: Pact's relayer today.
     address feeVault = address(0xFEE);
     address officer = vm.addr(OFFICER_KEY);
     address alice = vm.addr(ALICE_KEY);
@@ -58,13 +60,20 @@ contract InvoiceReceivablesTest is Test {
         vm.warp(1_800_000_000);
         payer = vm.addr(PAYER_KEY);
         token = new BlockingUSDT();
-        tank = new GasTank();
-        router = new Router(IERC20(address(token)), tank, address(this));
-        tank.setRouter(address(router));
+        fees = new FeeSchedule(
+            feeVault,
+            address(this),
+            79_000_000,
+            FeeSchedule.Terms(FeeSchedule.Rate(80, 150_000, 0), FeeSchedule.Rate(50, 150_000, 10_000_000))
+        );
+        router = new Router(IERC20(address(token)), IFeeSchedule(address(fees)));
         registry = new InvestorRegistry(address(this));
         registry.setOfficer(officer, true);
         market = new InvoiceReceivables(_config());
-        router.setAllowed(address(market), market.pay.selector, true, false);
+        router.setAllowed(address(market), market.pay.selector, true, false, false, true);
+        router.setAllowed(address(market), market.buyBack.selector, true, false, true, false);
+        vm.prank(merchant);
+        fees.accept(1);
 
         for (uint256 i; i < 3; i++) {
             address who = [alice, bob, carol][i];
@@ -81,9 +90,6 @@ contract InvoiceReceivablesTest is Test {
         vm.startPrank(merchant);
         token.approve(address(market), type(uint256).max);
         token.approve(address(router), type(uint256).max);
-        vm.deal(merchant, 10 ether);
-        tank.deposit{value: 1 ether}(merchant);
-        tank.setDailyCap(0.5 ether);
         vm.stopPrank();
         vm.txGasPrice(1 gwei);
         maturity = uint64(block.timestamp + 30 days);
@@ -94,7 +100,7 @@ contract InvoiceReceivablesTest is Test {
             usdt: IERC20(address(token)),
             router: address(router),
             registry: IInvestorRegistry(address(registry)),
-            feeVault: feeVault,
+            fees: IFeeSchedule(address(fees)),
             feeBps: 50,
             reserveBps: 1_000,
             lateFeeBps: 100,
@@ -201,18 +207,15 @@ contract InvoiceReceivablesTest is Test {
     function _routerPay(uint256 id, bytes32 paymentId, uint256 amount, uint256 nonce) internal returns (bool ok) {
         bytes memory data = abi.encodeCall(market.pay, (id, paymentId, amount));
         Router.Intent memory i = Router.Intent(
-            payer,
-            merchant,
-            address(market),
-            keccak256(data),
-            amount,
-            10_000,
-            nonce,
-            uint64(block.timestamp + 1 hours),
-            900_000
+            payer, merchant, address(market), keccak256(data), amount, nonce, uint64(block.timestamp + 1 hours), 900_000
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(PAYER_KEY, router.hashIntent(i));
+        vm.prank(feeVault);
         (ok,) = router.execute(i, data, abi.encodePacked(r, s, v));
+    }
+
+    function _digest(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19\x01", _domain(address(market), "Pact Receivables"), structHash));
     }
 
     function _pay(uint256 id, bytes32 paymentId, uint256 amount) internal {
@@ -221,7 +224,9 @@ contract InvoiceReceivablesTest is Test {
     }
 
     function _accounted() internal view returns (uint256 total) {
-        for (uint256 id = 1; id <= market.claimCount(); id++) total += _reserve(id);
+        for (uint256 id = 1; id <= market.claimCount(); id++) {
+            total += _reserve(id);
+        }
         total += market.totalClaimable();
     }
 
@@ -303,7 +308,9 @@ contract InvoiceReceivablesTest is Test {
         vm.prank(merchant);
         vm.expectRevert(InvoiceReceivables.AlreadyListed.selector);
         market.list("inv_1", payer, FACE, maturity, 300, ack);
-        assertEq(market.acknowledgementClaim(market.acknowledgementDigest("inv_1", merchant, payer, FACE, maturity)), again);
+        assertEq(
+            market.acknowledgementClaim(market.acknowledgementDigest("inv_1", merchant, payer, FACE, maturity)), again
+        );
         // A listing the customer paid into before any sale stays used too.
         uint256 other = _listAs("inv_3", FACE, maturity, 300);
         _pay(other, keccak256("p2"), 10 * USDT);
@@ -451,7 +458,15 @@ contract InvoiceReceivablesTest is Test {
     {
         bytes32 structHash = keccak256(
             abi.encode(
-                registry.DECISION_TYPEHASH(), d.officer, d.investor, d.approve, d.expiresAt, d.region, version, nonce, d.deadline
+                registry.DECISION_TYPEHASH(),
+                d.officer,
+                d.investor,
+                d.approve,
+                d.expiresAt,
+                d.region,
+                version,
+                nonce,
+                d.deadline
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", _domain(address(registry), "Pact Investor Registry"), structHash));
@@ -496,7 +511,8 @@ contract InvoiceReceivablesTest is Test {
         vm.expectRevert(InvoiceReceivables.AcknowledgementUsed.selector);
         next.list("inv_1", payer, FACE, maturity, 300, ack);
         // A different invoice lists on the new deployment as usual.
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(PAYER_KEY, next.acknowledgementDigest("inv_9", merchant, payer, FACE, maturity));
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(PAYER_KEY, next.acknowledgementDigest("inv_9", merchant, payer, FACE, maturity));
         vm.prank(merchant);
         next.list("inv_9", payer, FACE, maturity, 300, abi.encodePacked(r, s, v));
     }
@@ -508,7 +524,8 @@ contract InvoiceReceivablesTest is Test {
             InvoiceReceivables.PurchaseOrder(id, alice, 100 * USDT, 97 * USDT, block.timestamp + 1 hours);
         bytes memory signature = _sign(ALICE_KEY, _purchaseDigest(o, 0));
         // Signed cancellation, submitted by a relayer.
-        bytes32 cancelHash = keccak256(abi.encode(market.CANCEL_TYPEHASH(), alice, uint256(0), block.timestamp + 1 hours));
+        bytes32 cancelHash =
+            keccak256(abi.encode(market.CANCEL_TYPEHASH(), alice, uint256(0), block.timestamp + 1 hours));
         bytes memory cancel = _sign(
             ALICE_KEY, keccak256(abi.encodePacked("\x19\x01", _domain(address(market), "Pact Receivables"), cancelHash))
         );
@@ -546,14 +563,24 @@ contract InvoiceReceivablesTest is Test {
 
     function testOfficersSignDecisionsForARelayer() public {
         address dave = address(0xDA7E);
-        InvestorRegistry.Decision memory d =
-            InvestorRegistry.Decision(officer, dave, true, uint64(block.timestamp + 30 days), "FR", block.timestamp + 1 hours);
+        InvestorRegistry.Decision memory d = InvestorRegistry.Decision(
+            officer, dave, true, uint64(block.timestamp + 30 days), "FR", block.timestamp + 1 hours
+        );
         bytes32 structHash = keccak256(
             abi.encode(
-                registry.DECISION_TYPEHASH(), d.officer, d.investor, d.approve, d.expiresAt, d.region, uint256(0), uint256(0), d.deadline
+                registry.DECISION_TYPEHASH(),
+                d.officer,
+                d.investor,
+                d.approve,
+                d.expiresAt,
+                d.region,
+                uint256(0),
+                uint256(0),
+                d.deadline
             )
         );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domain(address(registry), "Pact Investor Registry"), structHash));
+        bytes32 digest =
+            keccak256(abi.encodePacked("\x19\x01", _domain(address(registry), "Pact Investor Registry"), structHash));
         vm.prank(outsider);
         registry.decideWithSig(d, _sign(OFFICER_KEY, digest));
         assertTrue(registry.isApproved(dave));
@@ -563,11 +590,25 @@ contract InvoiceReceivablesTest is Test {
         InvestorRegistry.Decision memory fake =
             InvestorRegistry.Decision(alice, dave, false, 0, bytes2(0), block.timestamp + 1 hours);
         bytes32 fakeHash = keccak256(
-            abi.encode(registry.DECISION_TYPEHASH(), fake.officer, fake.investor, fake.approve, fake.expiresAt, fake.region, registry.decisions(dave), uint256(0), fake.deadline)
+            abi.encode(
+                registry.DECISION_TYPEHASH(),
+                fake.officer,
+                fake.investor,
+                fake.approve,
+                fake.expiresAt,
+                fake.region,
+                registry.decisions(dave),
+                uint256(0),
+                fake.deadline
+            )
         );
         vm.expectRevert(InvestorRegistry.NotOfficer.selector);
         registry.decideWithSig(
-            fake, _sign(ALICE_KEY, keccak256(abi.encodePacked("\x19\x01", _domain(address(registry), "Pact Investor Registry"), fakeHash)))
+            fake,
+            _sign(
+                ALICE_KEY,
+                keccak256(abi.encodePacked("\x19\x01", _domain(address(registry), "Pact Investor Registry"), fakeHash))
+            )
         );
         assertTrue(registry.isApproved(dave));
     }
@@ -724,8 +765,10 @@ contract InvoiceReceivablesTest is Test {
         assertTrue(_routerPay(id, keccak256("pay-1"), FACE, 1));
         assertEq(token.balanceOf(alice) - aliceBefore, 600 * USDT);
         assertEq(token.balanceOf(bob) - bobBefore, 400 * USDT);
-        // Paid on time: the whole reserve goes back to the merchant, less the Router's sponsorship fee.
-        assertEq(token.balanceOf(merchant) + 10_000 - merchantBefore, 100 * USDT);
+        // Paid on time: the whole reserve goes back to the merchant. A financed invoice's payment carries
+        // no fee: Pact took its share when the units sold.
+        assertEq(token.balanceOf(merchant) - merchantBefore, 100 * USDT);
+        assertEq(token.balanceOf(feeVault), 5 * USDT);
         assertEq(uint8(_status(id)), uint8(InvoiceReceivables.Status.Repaid));
         assertEq(token.balanceOf(address(market)), 0);
         assertEq(market.activeClaim(merchant, INVOICE), 0);
@@ -740,6 +783,11 @@ contract InvoiceReceivablesTest is Test {
         assertEq(amount, 250 * USDT);
         vm.expectRevert(InvoiceReceivables.InvalidAmount.selector);
         market.sponsorshipQuote(abi.encodeCall(market.buy, (id, 1)));
+        vm.warp(maturity + 7 days + 1);
+        market.markDefault(id);
+        (quoted, amount) = market.sponsorshipQuote(abi.encodeCall(market.buyBack, (id)));
+        assertEq(quoted, merchant);
+        assertEq(amount, market.owed(id));
     }
 
     function testPartialSaleSplitsEachPayment() public {
@@ -773,9 +821,13 @@ contract InvoiceReceivablesTest is Test {
     function testPaymentBeforeAnySaleWithdrawsTheListing() public {
         uint256 id = _list(300);
         uint256 merchantBefore = token.balanceOf(merchant);
+        vm.expectEmit(true, true, true, true, address(market));
+        emit InvoiceReceivables.Paid(id, keccak256("p1"), payer, 100 * USDT, 0, 100 * USDT - 500_000, 500_000);
         _pay(id, keccak256("p1"), 100 * USDT);
         assertEq(uint8(_status(id)), uint8(InvoiceReceivables.Status.Withdrawn));
-        assertEq(token.balanceOf(merchant) - merchantBefore, 100 * USDT);
+        // Never financed: paid like any invoice, less Pact's 0.5% invoice fee.
+        assertEq(token.balanceOf(merchant) - merchantBefore, 100 * USDT - 500_000);
+        assertEq(token.balanceOf(feeVault), 500_000);
         vm.prank(payer);
         vm.expectRevert(InvoiceReceivables.WrongStatus.selector);
         market.pay(id, keccak256("p2"), 100 * USDT);
@@ -920,6 +972,125 @@ contract InvoiceReceivablesTest is Test {
         return _listAs("inv_2", FACE, maturity, 300);
     }
 
+    // ---------------------------------------------------------------- signed merchant actions
+
+    function _listOrder(string memory invoiceId) internal view returns (InvoiceReceivables.ListOrder memory) {
+        return InvoiceReceivables.ListOrder(merchant, invoiceId, payer, FACE, maturity, 300, block.timestamp + 1 hours);
+    }
+
+    function _listDigest(InvoiceReceivables.ListOrder memory o, bytes memory ack, uint256 nonce)
+        internal
+        view
+        returns (bytes32)
+    {
+        return _digest(
+            keccak256(
+                abi.encode(
+                    market.LIST_TYPEHASH(),
+                    o.merchant,
+                    keccak256(bytes(o.invoiceId)),
+                    o.debtor,
+                    o.face,
+                    o.maturity,
+                    o.discountBps,
+                    keccak256(ack),
+                    nonce,
+                    o.deadline
+                )
+            )
+        );
+    }
+
+    function testAMerchantListsAndCancelsBySignatureWithoutGas() public {
+        InvoiceReceivables.ListOrder memory o = _listOrder("inv_1");
+        bytes memory ack = _acknowledge("inv_1", FACE, maturity);
+        bytes memory signature = _sign(MERCHANT_KEY, _listDigest(o, ack, 0));
+        // Anyone but the merchant signing is refused, and so is a changed term.
+        o.discountBps = 400;
+        vm.expectRevert(InvoiceReceivables.InvalidSignature.selector);
+        market.listWithSig(o, ack, signature);
+        o.discountBps = 300;
+        vm.prank(outsider);
+        uint256 id = market.listWithSig(o, ack, signature);
+        assertEq(market.activeClaim(merchant, INVOICE), id);
+        assertEq(market.nonces(merchant), 1);
+        assertEq(merchant.balance, 0);
+        vm.expectRevert(InvoiceReceivables.InvalidSignature.selector);
+        market.listWithSig(o, ack, signature);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 cancelDigest =
+            _digest(keccak256(abi.encode(market.CANCEL_LISTING_TYPEHASH(), merchant, id, uint256(1), deadline)));
+        vm.expectRevert(InvoiceReceivables.InvalidSignature.selector);
+        market.cancelWithSig(merchant, id, deadline, _sign(ALICE_KEY, cancelDigest));
+        // Another account's signature cannot cancel the merchant's listing in its own name either.
+        bytes memory aliceSignature = _sign(
+            ALICE_KEY, _digest(keccak256(abi.encode(market.CANCEL_LISTING_TYPEHASH(), alice, id, uint256(0), deadline)))
+        );
+        vm.expectRevert(InvoiceReceivables.NotAuthorized.selector);
+        market.cancelWithSig(alice, id, deadline, aliceSignature);
+        market.cancelWithSig(merchant, id, deadline, _sign(MERCHANT_KEY, cancelDigest));
+        assertEq(uint8(_status(id)), uint8(InvoiceReceivables.Status.Cancelled));
+        vm.warp(deadline + 1);
+        vm.expectRevert(InvoiceReceivables.SignatureExpired.selector);
+        market.cancelWithSig(merchant, id, deadline, _sign(MERCHANT_KEY, cancelDigest));
+    }
+
+    function testListingNeedsAcceptedFeeTerms() public {
+        uint256 newcomerKey = 0xD00D;
+        address newcomer = vm.addr(newcomerKey);
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(PAYER_KEY, market.acknowledgementDigest("inv_7", newcomer, payer, FACE, maturity));
+        vm.prank(newcomer);
+        vm.expectRevert(FeeSchedule.TermsNotAccepted.selector);
+        market.list("inv_7", payer, FACE, maturity, 300, abi.encodePacked(r, s, v));
+    }
+
+    function testAHolderWithdrawsBySignature() public {
+        uint256 id = _list(300);
+        _buy(alice, id, 600 * USDT);
+        _buy(bob, id, 400 * USDT);
+        token.setBlocked(bob, true);
+        _pay(id, keccak256("p1"), FACE);
+        token.setBlocked(bob, false);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 digest = _digest(keccak256(abi.encode(market.WITHDRAW_TYPEHASH(), bob, uint256(0), deadline)));
+        vm.expectRevert(InvoiceReceivables.InvalidSignature.selector);
+        market.withdrawWithSig(bob, deadline, _sign(ALICE_KEY, digest));
+        uint256 before = token.balanceOf(bob);
+        vm.prank(outsider);
+        market.withdrawWithSig(bob, deadline, _sign(BOB_KEY, digest));
+        assertEq(token.balanceOf(bob) - before, 400 * USDT);
+        assertEq(market.totalClaimable(), 0);
+    }
+
+    function testASponsoredBuyBackChargesTheMerchantItsGas() public {
+        uint256 id = _list(300);
+        _buy(alice, id, 600 * USDT);
+        _buy(bob, id, 400 * USDT);
+        vm.warp(maturity + 7 days + 1);
+        market.markDefault(id);
+        uint256 owed = market.owed(id);
+        bytes memory data = abi.encodeCall(market.buyBack, (id));
+        // A buy-back moves the merchant's money: only the merchant's own signature can send it.
+        Router.Intent memory i = Router.Intent(
+            alice, merchant, address(market), keccak256(data), owed, 1, uint64(block.timestamp + 1 hours), 900_000
+        );
+        vm.prank(feeVault);
+        (bool ok,) = router.execute(i, data, _sign(ALICE_KEY, router.hashIntent(i)));
+        assertFalse(ok);
+        i.signer = merchant;
+        uint256 merchantBefore = token.balanceOf(merchant);
+        uint256 vaultBefore = token.balanceOf(feeVault);
+        vm.prank(feeVault);
+        (ok,) = router.execute(i, data, _sign(MERCHANT_KEY, router.hashIntent(i)));
+        assertTrue(ok);
+        uint256 gasFee = token.balanceOf(feeVault) - vaultBefore;
+        assertGt(gasFee, 0);
+        assertLe(gasFee, router.maxGasFee(i.maxGas, 1 gwei));
+        assertEq(merchantBefore - token.balanceOf(merchant), owed + gasFee);
+        assertEq(uint8(_status(id)), uint8(InvoiceReceivables.Status.BoughtBack));
+    }
+
     // ---------------------------------------------------------------- delivery failures
 
     function testUndeliverablePaymentsAreCreditedNotLost() public {
@@ -928,7 +1099,9 @@ contract InvoiceReceivablesTest is Test {
         _buy(bob, id, 400 * USDT);
         token.setBlocked(bob, true);
         _pay(id, keccak256("p1"), FACE);
-        assertEq(uint8(_status(id)), uint8(InvoiceReceivables.Status.Repaid), "one blocked holder cannot stall repayment");
+        assertEq(
+            uint8(_status(id)), uint8(InvoiceReceivables.Status.Repaid), "one blocked holder cannot stall repayment"
+        );
         assertEq(market.claimable(bob), 400 * USDT);
         assertEq(token.balanceOf(address(market)), _accounted());
         token.setBlocked(bob, false);
@@ -946,9 +1119,14 @@ contract InvoiceReceivablesTest is Test {
 
     /// Any sale split, payment schedule and outcome keeps the books balanced and never pays a holder
     /// more than face value plus the late fee.
-    function testFuzzBooksBalance(uint96 face, uint16 discountBps, uint8 splitA, uint8 splitB, uint8 payments, uint8 outcome)
-        public
-    {
+    function testFuzzBooksBalance(
+        uint96 face,
+        uint16 discountBps,
+        uint8 splitA,
+        uint8 splitB,
+        uint8 payments,
+        uint8 outcome
+    ) public {
         uint256 f = bound(uint256(face), 10 * USDT, 5_000 * USDT);
         uint16 discount = uint16(bound(discountBps, 0, 2_000));
         uint256 id = _listAs("inv_1", f, maturity, discount);

@@ -1,44 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IFeeSchedule} from "../src/FeeSchedule.sol";
 import {SubscriptionManagerV2} from "../src/SubscriptionManagerV2.sol";
-import {GasTank} from "../src/GasTank.sol";
 import {Router} from "../src/Router.sol";
-import {MockNoBoolUSDT} from "./mocks/MockNoBoolUSDT.sol";
+import {PactSuite} from "./utils/PactSuite.sol";
 
-contract SubscriptionV2Test is Test {
-    uint256 constant PAYER_KEY = 0xA11CE;
-    uint256 constant MERCHANT_KEY = 0xBEEF;
-    address payer;
-    address merchant;
-    MockNoBoolUSDT token;
-    GasTank tank;
-    Router router;
-    SubscriptionManagerV2 subs;
-
-    receive() external payable {}
+contract SubscriptionV2Test is PactSuite {
+    uint256 constant FEE = 150_000; // 0.8% of 2 USDT is below the 0.15 USDT floor.
 
     function setUp() public {
         vm.warp(1_800_000_000);
-        payer = vm.addr(PAYER_KEY);
-        merchant = vm.addr(MERCHANT_KEY);
-        token = new MockNoBoolUSDT();
-        tank = new GasTank();
-        router = new Router(IERC20(address(token)), tank, address(this));
-        tank.setRouter(address(router));
-        subs = new SubscriptionManagerV2(IERC20(address(token)), address(router), address(this));
-        router.setAllowed(address(subs), subs.subscribe.selector, true, false);
-        router.setAllowed(address(subs), subs.replace.selector, true, false);
-        router.setAllowed(address(subs), subs.charge.selector, true, true);
+        _deploy();
         token.mint(merchant, 100_000_000);
         token.mint(payer, 100_000_000);
-        vm.prank(merchant);
-        token.approve(address(router), 1_000_000);
         vm.prank(payer);
         token.approve(address(subs), 100_000_000);
-        vm.txGasPrice(1 gwei);
     }
 
     function mandate(uint256 nonce) internal view returns (SubscriptionManagerV2.Mandate memory) {
@@ -47,29 +25,14 @@ contract SubscriptionV2Test is Test {
         );
     }
 
-    function sign(uint256 key, bytes32 hash) internal pure returns (bytes memory) {
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, hash);
-        return abi.encodePacked(r, s, v);
-    }
-
     function register() internal returns (bytes32) {
-        SubscriptionManagerV2.Mandate memory m = mandate(0);
-        return subs.subscribe(
-            m, sign(PAYER_KEY, subs.hashMandate(m)), m.endTime, sign(MERCHANT_KEY, subs.hashConsent(m, m.endTime))
-        );
+        SubscriptionManagerV2.Mandate memory m = mandate(subs.nonces(payer));
+        return subs.subscribe(m, _sign(PAYER_KEY, subs.hashMandate(m)));
     }
 
     function cancelled(bytes32 id) internal view returns (bool) {
         (,,,,,,,,, bool value) = subs.subscriptions(id);
         return value;
-    }
-
-    function fundTank() internal {
-        vm.deal(merchant, 1 ether);
-        vm.startPrank(merchant);
-        tank.deposit{value: 0.5 ether}(merchant);
-        tank.setDailyCap(0.5 ether);
-        vm.stopPrank();
     }
 
     function execute(bytes memory data, uint256 nonce, uint256 key) internal returns (bool ok) {
@@ -79,167 +42,207 @@ contract SubscriptionV2Test is Test {
             address(subs),
             keccak256(data),
             2_000_000,
-            10_000,
             nonce,
             uint64(block.timestamp + 1 hours),
             500_000
         );
-        (ok,) = router.execute(i, data, sign(key, router.hashIntent(i)));
+        bytes memory signature = _sign(key, router.hashIntent(i));
+        vm.prank(relayer);
+        (ok,) = router.execute(i, data, signature);
     }
 
-    function testMerchantConsentIsRequiredForDirectAndSponsoredRegistration() public {
-        SubscriptionManagerV2.Mandate memory m = mandate(0);
-        bytes memory payerSignature = sign(PAYER_KEY, subs.hashMandate(m));
-        vm.expectRevert(SubscriptionManagerV2.InvalidConsent.selector);
-        subs.subscribe(m, payerSignature, m.endTime, "");
-        fundTank();
-        uint256 balance = tank.balanceOf(merchant);
-        uint256 allowance = token.allowance(merchant, address(router));
-        assertFalse(execute(abi.encodeCall(subs.subscribe, (m, payerSignature, m.endTime, bytes(""))), 1, PAYER_KEY));
-        assertEq(tank.balanceOf(merchant), balance);
-        assertEq(token.allowance(merchant, address(router)), allowance);
-        assertEq(subs.nonces(payer), 0);
-        assertFalse(router.usedNonces(payer, 1));
+    function expectRefusal(bytes32 id, SubscriptionManagerV2.Refusal reason) internal {
+        vm.expectEmit(true, false, false, true, address(subs));
+        emit SubscriptionManagerV2.Refused(id, reason);
     }
 
-    function testApprovedSponsoredRegistrationAndMerchantRenewalPayFees() public {
+    function testSponsoredRegistrationIsFreeAndEachRenewalPaysTheMerchantLessTheFee() public {
         SubscriptionManagerV2.Mandate memory m = mandate(0);
-        fundTank();
-        uint256 beforeTank = tank.balanceOf(merchant);
-        assertTrue(
-            execute(
-                abi.encodeCall(
-                    subs.subscribe,
-                    (
-                        m,
-                        sign(PAYER_KEY, subs.hashMandate(m)),
-                        m.endTime,
-                        sign(MERCHANT_KEY, subs.hashConsent(m, m.endTime))
-                    )
-                ),
-                1,
-                PAYER_KEY
-            )
-        );
+        assertTrue(execute(abi.encodeCall(subs.subscribe, (m, _sign(PAYER_KEY, subs.hashMandate(m)))), 1, PAYER_KEY));
         assertEq(subs.nonces(payer), 1);
-        assertLt(tank.balanceOf(merchant), beforeTank);
-        assertEq(token.allowance(merchant, address(router)), 990_000);
+        assertEq(token.balanceOf(relayer), 0);
+        assertEq(token.balanceOf(merchant), 100_000_000);
         bytes32 id = keccak256(abi.encode(payer, uint256(0), address(subs)));
         uint256 beforePayer = token.balanceOf(payer);
-        beforeTank = tank.balanceOf(merchant);
+        vm.expectEmit(true, false, false, true, address(subs));
+        emit SubscriptionManagerV2.Charged(id, 2_000_000, 1, FEE);
         assertTrue(execute(abi.encodeCall(subs.charge, (id, 2_000_000)), 1, MERCHANT_KEY));
         assertEq(token.balanceOf(payer), beforePayer - 2_000_000);
-        assertLt(tank.balanceOf(merchant), beforeTank);
-        assertEq(token.allowance(merchant, address(router)), 980_000);
+        assertEq(token.balanceOf(merchant), 100_000_000 + 2_000_000 - FEE);
+        assertEq(token.balanceOf(relayer), FEE);
+        assertEq(token.balanceOf(address(subs)), 0);
         assertEq(payer.balance, 0);
+        // Too early for the next period: refused, and nothing moves.
         assertFalse(execute(abi.encodeCall(subs.charge, (id, 2_000_000)), 2, MERCHANT_KEY));
-        assertEq(token.allowance(merchant, address(router)), 980_000);
+        assertEq(token.balanceOf(relayer), FEE);
     }
 
-    function testConsentExpiryRevocationAndReplay() public {
+    function testTheKeeperRenewalPaysTheFeeToo() public {
+        bytes32 id = register();
+        vm.expectRevert(SubscriptionManagerV2.NotAuthorized.selector);
+        vm.prank(other);
+        subs.charge(id, 2_000_000);
+        vm.prank(keeper);
+        assertTrue(subs.charge(id, 2_000_000));
+        assertEq(token.balanceOf(merchant), 100_000_000 + 2_000_000 - FEE);
+        assertEq(token.balanceOf(relayer), FEE);
+    }
+
+    function testRenewalForAMerchantWithoutTermsIsRefusedNotCharged() public {
         SubscriptionManagerV2.Mandate memory m = mandate(0);
-        bytes memory p = sign(PAYER_KEY, subs.hashMandate(m));
-        uint64 deadline = uint64(block.timestamp - 1);
-        bytes memory c = sign(MERCHANT_KEY, subs.hashConsent(m, deadline));
-        vm.expectRevert(SubscriptionManagerV2.InvalidConsent.selector);
-        subs.subscribe(m, p, deadline, c);
-        deadline = m.endTime + 1;
-        c = sign(MERCHANT_KEY, subs.hashConsent(m, deadline));
-        vm.expectRevert(SubscriptionManagerV2.InvalidConsent.selector);
-        subs.subscribe(m, p, deadline, c);
-        c = sign(MERCHANT_KEY, subs.hashConsent(m, m.endTime));
-        bytes32 hash = subs.hashMandate(m);
-        vm.prank(merchant);
-        subs.revokeConsent(hash);
-        vm.expectRevert(SubscriptionManagerV2.InvalidConsent.selector);
-        subs.subscribe(m, p, m.endTime, c);
-        assertEq(subs.nonces(payer), 0);
-        // Revoking the same digest as another address cannot revoke this merchant's consent.
-        m.planId = keccak256("another approved plan");
-        p = sign(PAYER_KEY, subs.hashMandate(m));
-        c = sign(MERCHANT_KEY, subs.hashConsent(m, m.endTime));
-        subs.revokeConsent(subs.hashMandate(m));
-        subs.subscribe(m, p, m.endTime, c);
+        m.merchant = address(0xD00D);
+        bytes32 id = subs.subscribe(m, _sign(PAYER_KEY, subs.hashMandate(m)));
+        expectRefusal(id, SubscriptionManagerV2.Refusal.FeeUnavailable);
+        vm.prank(keeper);
+        assertFalse(subs.charge(id, 2_000_000));
+        assertEq(token.balanceOf(payer), 100_000_000);
+    }
+
+    function testRenewalRefusalReasons() public {
+        // Absolute times: via-IR may reuse an earlier TIMESTAMP read across warps.
+        uint256 start = block.timestamp;
+        SubscriptionManagerV2.Mandate memory m = mandate(0);
+        m.maxPeriods = 2;
+        m.endTime = uint64(start + 4 days);
+        bytes32 id = subs.subscribe(m, _sign(PAYER_KEY, subs.hashMandate(m)));
+        expectRefusal(id, SubscriptionManagerV2.Refusal.CapExceeded);
+        vm.prank(keeper);
+        assertFalse(subs.charge(id, 2_000_001));
+        vm.prank(keeper);
+        assertTrue(subs.charge(id, 2_000_000));
+        expectRefusal(id, SubscriptionManagerV2.Refusal.TooEarly);
+        vm.prank(keeper);
+        assertFalse(subs.charge(id, 2_000_000));
+        vm.prank(payer);
+        token.approve(address(subs), 0);
+        vm.warp(start + 1 days);
+        expectRefusal(id, SubscriptionManagerV2.Refusal.InsufficientFunds);
+        vm.prank(keeper);
+        assertFalse(subs.charge(id, 2_000_000));
+        vm.prank(payer);
+        token.approve(address(subs), type(uint256).max);
+        token.setFailTransfers(true);
+        expectRefusal(id, SubscriptionManagerV2.Refusal.TransferFailed);
+        vm.prank(keeper);
+        assertFalse(subs.charge(id, 2_000_000));
+        token.setFailTransfers(false);
+        vm.prank(keeper);
+        assertTrue(subs.charge(id, 2_000_000));
+        vm.warp(start + 2 days);
+        expectRefusal(id, SubscriptionManagerV2.Refusal.MaxPeriods);
+        vm.prank(keeper);
+        assertFalse(subs.charge(id, 2_000_000));
+        vm.warp(start + 5 days);
+        expectRefusal(id, SubscriptionManagerV2.Refusal.Expired);
+        vm.prank(keeper);
+        assertFalse(subs.charge(id, 2_000_000));
+        vm.prank(payer);
+        subs.cancel(id);
         vm.expectRevert(SubscriptionManagerV2.InvalidMandate.selector);
-        subs.subscribe(m, p, m.endTime, c);
+        vm.prank(payer);
+        subs.cancel(id);
+        expectRefusal(id, SubscriptionManagerV2.Refusal.Cancelled);
+        vm.prank(keeper);
+        assertFalse(subs.charge(id, 2_000_000));
+        assertEq(token.balanceOf(relayer), 2 * FEE);
     }
 
-    function testFuzzConsentBindsEveryMandateField(uint8 field) public {
-        SubscriptionManagerV2.Mandate memory m = mandate(0);
-        uint64 deadline = uint64(block.timestamp + 1 hours);
-        bytes memory consent = sign(MERCHANT_KEY, subs.hashConsent(m, deadline));
-        uint8 index = field % 8;
-        if (index == 0) m.payer = address(0x1234);
-        if (index == 1) m.merchant = address(0x5678);
-        if (index == 2) m.planId = keccak256("changed");
-        if (index == 3) m.amountCap++;
-        if (index == 4) m.periodSeconds++;
-        if (index == 5) m.maxPeriods++;
-        if (index == 6) m.endTime++;
-        if (index == 7) m.nonce++;
-        bytes memory payerSignature = sign(PAYER_KEY, subs.hashMandate(m));
-        vm.expectRevert(SubscriptionManagerV2.InvalidConsent.selector);
-        subs.subscribe(m, payerSignature, deadline, consent);
-        assertEq(subs.nonces(payer), 0);
+    function testFreeSponsoredCancellation() public {
+        bytes32 id = register();
+        bytes memory data = abi.encodeCall(subs.cancel, (id));
+        assertTrue(execute(data, 7, PAYER_KEY));
+        assertTrue(cancelled(id));
+        assertEq(token.balanceOf(relayer), 0);
+        assertEq(token.balanceOf(payer), 100_000_000);
     }
 
-    function testConsentCannotCrossChainContractOrDeadline() public {
+    function testThePayerSignatureIsRequiredAndUsedOnce() public {
         SubscriptionManagerV2.Mandate memory m = mandate(0);
-        uint64 deadline = uint64(block.timestamp + 1 hours);
-        bytes memory consent = sign(MERCHANT_KEY, subs.hashConsent(m, deadline));
-        bytes memory p = sign(PAYER_KEY, subs.hashMandate(m));
-        vm.expectRevert(SubscriptionManagerV2.InvalidConsent.selector);
-        subs.subscribe(m, p, deadline + 1, consent);
-        SubscriptionManagerV2 other = new SubscriptionManagerV2(IERC20(address(token)), address(router), address(this));
-        bytes memory otherPayerSignature = sign(PAYER_KEY, other.hashMandate(m));
-        vm.expectRevert(SubscriptionManagerV2.InvalidConsent.selector);
-        other.subscribe(m, otherPayerSignature, deadline, consent);
-        vm.chainId(block.chainid + 1);
-        p = sign(PAYER_KEY, subs.hashMandate(m));
-        vm.expectRevert(SubscriptionManagerV2.InvalidConsent.selector);
-        subs.subscribe(m, p, deadline, consent);
-    }
-
-    function testPayerSignatureIsAlsoRequired() public {
-        SubscriptionManagerV2.Mandate memory m = mandate(0);
-        bytes memory wrong = sign(MERCHANT_KEY, subs.hashMandate(m));
-        bytes memory consent = sign(MERCHANT_KEY, subs.hashConsent(m, m.endTime));
+        bytes memory wrong = _sign(MERCHANT_KEY, subs.hashMandate(m));
         vm.expectRevert(SubscriptionManagerV2.InvalidSignature.selector);
-        subs.subscribe(m, wrong, m.endTime, consent);
+        subs.subscribe(m, wrong);
+        assertEq(subs.nonces(payer), 0);
+        bytes memory signature = _sign(PAYER_KEY, subs.hashMandate(m));
+        subs.subscribe(m, signature);
+        vm.expectRevert(SubscriptionManagerV2.InvalidMandate.selector);
+        subs.subscribe(m, signature);
+        // The next mandate needs its own signature.
+        SubscriptionManagerV2.Mandate memory next = mandate(1);
+        vm.expectRevert(SubscriptionManagerV2.InvalidSignature.selector);
+        subs.subscribe(next, signature);
+    }
+
+    function testFuzzPayerSignatureBindsEveryMandateField(uint8 field) public {
+        SubscriptionManagerV2.Mandate memory m = mandate(0);
+        bytes memory signature = _sign(PAYER_KEY, subs.hashMandate(m));
+        uint8 index = field % 7;
+        if (index == 0) m.merchant = address(0x5678);
+        if (index == 1) m.planId = keccak256("changed");
+        if (index == 2) m.amountCap++;
+        if (index == 3) m.periodSeconds++;
+        if (index == 4) m.maxPeriods++;
+        if (index == 5) m.endTime++;
+        if (index == 6) m.payer = address(0x1234);
+        vm.expectRevert(SubscriptionManagerV2.InvalidSignature.selector);
+        subs.subscribe(m, signature);
         assertEq(subs.nonces(payer), 0);
     }
 
-    function testReplaceRequiresFreshConsentAndIsAtomic() public {
+    function testMandateCannotCrossContractOrChain() public {
+        SubscriptionManagerV2.Mandate memory m = mandate(0);
+        bytes memory signature = _sign(PAYER_KEY, subs.hashMandate(m));
+        SubscriptionManagerV2 second =
+            new SubscriptionManagerV2(IERC20(address(token)), address(router), keeper, IFeeSchedule(address(fees)));
+        vm.expectRevert(SubscriptionManagerV2.InvalidSignature.selector);
+        second.subscribe(m, signature);
+        vm.chainId(block.chainid + 1);
+        vm.expectRevert(SubscriptionManagerV2.InvalidSignature.selector);
+        subs.subscribe(m, signature);
+    }
+
+    function testReplaceIsAtomicAndKeepsPayerAndMerchant() public {
         bytes32 id = register();
         SubscriptionManagerV2.Mandate memory m = mandate(1);
-        bytes memory p = sign(PAYER_KEY, subs.hashMandate(m));
-        vm.expectRevert(SubscriptionManagerV2.InvalidConsent.selector);
+        bytes memory p = _sign(PAYER_KEY, subs.hashMandate(m));
+        // Only the payer replaces, and the new mandate keeps the same merchant.
+        vm.expectRevert(SubscriptionManagerV2.NotAuthorized.selector);
+        vm.prank(other);
+        subs.replace(id, m, p);
+        SubscriptionManagerV2.Mandate memory elsewhere = mandate(1);
+        elsewhere.merchant = other;
+        bytes memory elsewhereSignature = _sign(PAYER_KEY, subs.hashMandate(elsewhere));
+        vm.expectRevert(SubscriptionManagerV2.NotAuthorized.selector);
         vm.prank(payer);
-        subs.replace(id, m, p, m.endTime, "");
+        subs.replace(id, elsewhere, elsewhereSignature);
+        // A bad new mandate leaves the old subscription untouched.
+        bytes memory wrong = _sign(MERCHANT_KEY, subs.hashMandate(m));
+        vm.expectRevert(SubscriptionManagerV2.InvalidSignature.selector);
+        vm.prank(payer);
+        subs.replace(id, m, wrong);
         assertFalse(cancelled(id));
         assertEq(subs.nonces(payer), 1);
-        bytes memory consent = sign(MERCHANT_KEY, subs.hashConsent(m, m.endTime));
         vm.prank(payer);
-        bytes32 replacement = subs.replace(id, m, p, m.endTime, consent);
+        bytes32 replacement = subs.replace(id, m, p);
         assertTrue(cancelled(id));
         assertFalse(cancelled(replacement));
         assertEq(subs.nonces(payer), 2);
+        vm.prank(keeper);
         assertFalse(subs.charge(id, 2_000_000));
     }
 
-    function testSignedCancellationWorksWithoutMerchantTankOrPayerGas() public {
+    function testSignedCancellationNeedsNoGasOrFeeFromAnyone() public {
         bytes32 id = register();
-        assertEq(tank.balanceOf(merchant), 0);
         assertEq(payer.balance, 0);
         uint256 balance = token.balanceOf(payer);
         uint64 deadline = uint64(block.timestamp + 1 hours);
-        bytes memory signature = sign(PAYER_KEY, subs.hashCancellation(id, deadline));
-        vm.prank(address(0xCAFE));
+        bytes memory signature = _sign(PAYER_KEY, subs.hashCancellation(id, deadline));
+        vm.prank(relayer);
         subs.cancelWithSignature(id, deadline, signature);
         assertTrue(cancelled(id));
+        vm.prank(keeper);
         assertFalse(subs.charge(id, 2_000_000));
         assertEq(token.balanceOf(payer), balance);
-        assertEq(tank.balanceOf(merchant), 0);
+        assertEq(token.balanceOf(relayer), 0);
         assertEq(payer.balance, 0);
         vm.expectRevert(SubscriptionManagerV2.InvalidMandate.selector);
         subs.cancelWithSignature(id, deadline, signature);
@@ -248,10 +251,10 @@ contract SubscriptionV2Test is Test {
     function testCancellationRejectsWrongSignerExpiredAndAlteredAuthorization() public {
         bytes32 id = register();
         uint64 deadline = uint64(block.timestamp + 1 hours);
-        bytes memory signature = sign(MERCHANT_KEY, subs.hashCancellation(id, deadline));
+        bytes memory signature = _sign(MERCHANT_KEY, subs.hashCancellation(id, deadline));
         vm.expectRevert(SubscriptionManagerV2.InvalidSignature.selector);
         subs.cancelWithSignature(id, deadline, signature);
-        signature = sign(PAYER_KEY, subs.hashCancellation(id, deadline));
+        signature = _sign(PAYER_KEY, subs.hashCancellation(id, deadline));
         vm.expectRevert(SubscriptionManagerV2.InvalidSignature.selector);
         subs.cancelWithSignature(id, deadline + 1, signature);
         vm.warp(deadline + 1);
@@ -261,26 +264,26 @@ contract SubscriptionV2Test is Test {
     }
 
     function testRenewalLimitsStillApply() public {
+        uint256 start = block.timestamp;
         bytes32 id = register();
+        vm.startPrank(keeper);
         assertFalse(subs.charge(id, 2_000_001));
         assertTrue(subs.charge(id, 2_000_000));
         assertFalse(subs.charge(id, 2_000_000));
-        vm.warp(block.timestamp + 1 days);
+        vm.warp(start + 1 days);
         assertTrue(subs.charge(id, 2_000_000));
-        vm.warp(block.timestamp + 31 days);
+        vm.warp(start + 32 days);
         assertFalse(subs.charge(id, 2_000_000));
+        vm.stopPrank();
         assertEq(token.balanceOf(payer), 96_000_000);
     }
 
     function testCancellationCannotCrossSubscriptionOrDomain() public {
         vm.chainId(1874);
         bytes32 first = register();
-        SubscriptionManagerV2.Mandate memory m = mandate(1);
-        bytes32 second = subs.subscribe(
-            m, sign(PAYER_KEY, subs.hashMandate(m)), m.endTime, sign(MERCHANT_KEY, subs.hashConsent(m, m.endTime))
-        );
+        bytes32 second = register();
         uint64 deadline = uint64(block.timestamp + 1 hours);
-        bytes memory signature = sign(PAYER_KEY, subs.hashCancellation(first, deadline));
+        bytes memory signature = _sign(PAYER_KEY, subs.hashCancellation(first, deadline));
         vm.expectRevert(SubscriptionManagerV2.InvalidSignature.selector);
         subs.cancelWithSignature(second, deadline, signature);
         // Explicit constants avoid optimizer assumptions that CHAINID stays
@@ -297,18 +300,20 @@ contract SubscriptionV2Test is Test {
     }
 
     function testMissingTokenAllowanceAndMaxPeriodsDoNotChargeExtra() public {
+        uint256 start = block.timestamp;
         SubscriptionManagerV2.Mandate memory m = mandate(0);
         m.maxPeriods = 1;
-        bytes32 id = subs.subscribe(
-            m, sign(PAYER_KEY, subs.hashMandate(m)), m.endTime, sign(MERCHANT_KEY, subs.hashConsent(m, m.endTime))
-        );
+        bytes32 id = subs.subscribe(m, _sign(PAYER_KEY, subs.hashMandate(m)));
         vm.prank(payer);
         token.approve(address(subs), 0);
+        vm.prank(keeper);
         assertFalse(subs.charge(id, 2_000_000));
         vm.prank(payer);
         token.approve(address(subs), 4_000_000);
+        vm.prank(keeper);
         assertTrue(subs.charge(id, 2_000_000));
-        vm.warp(block.timestamp + 1 days);
+        vm.warp(start + 1 days);
+        vm.prank(keeper);
         assertFalse(subs.charge(id, 2_000_000));
         assertEq(token.balanceOf(payer), 98_000_000);
         assertEq(token.allowance(payer, address(subs)), 2_000_000);
