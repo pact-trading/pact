@@ -1,32 +1,32 @@
-import { sponsoredAction } from './gas-tank.js';
 import { storedMetadata } from './metadata.js';
 import { amountString } from './db.js';
 import { orderEvent } from './commerce/events.js';
 import { chargedPeriods, discountView, renewalDiscountAmount } from './discounts.js';
 import { decodeFunctionData, encodeAbiParameters, keccak256, toHex, type Hex } from 'viem';
-import { escrowAbi, receivablesAbi, subscriptionAbi, subscriptionV2Abi } from './chain.js';
+import { escrowAbi, receivablesAbi, subscriptionAbi } from './chain.js';
 import type { ChainAdapter, ChainEvent, IntentRequest } from './types.js';
 import type { Db } from './db.js';
 import { id, now } from './db.js';
 import { enqueueWebhook } from './webhooks.js';
 import { recordAccounting } from './accounting.js';
 import { deadlineIso } from './merchant-settings.js';
-import { fundedRenewalEvidence } from './funded-renewal-store.js';
 
 type Row = Record<string, string>;
+/** Router.Refusal, in the contract's enum order. */
+export const ROUTER_REFUSALS = ['invalid_signature', 'deadline', 'replay', 'wrong_selector', 'quote_mismatch', 'dust', 'payer_daily_cap', 'gas_limit', 'gas_price', 'fee_unavailable', 'target_failed', 'target_refused', 'signer_not_merchant'];
 const same = (a: unknown, b: unknown) => a !== undefined && b !== undefined && String(a).toLowerCase() === String(b).toLowerCase();
 const matches = (event: ChainEvent, contract: ChainEvent['contract'], name: string, args: Record<string, unknown>) => event.contract === contract && event.name === name && Object.entries(args).every(([key, value]) => same(event.args[key], value));
-function expectedEvent(request: IntentRequest, version: 1 | 2): { contract: ChainEvent['contract']; name: string; args: Record<string, unknown>; paymentId?: string } | undefined {
+function expectedEvent(request: IntentRequest): { contract: ChainEvent['contract']; name: string; args: Record<string, unknown>; paymentId?: string } | undefined {
   try {
     const { functionName: name, args = [] } = decodeFunctionData({ abi: escrowAbi, data: request.data });
     const id = String(args[0]);
     const common = { contract: 'escrow' as const, paymentId: id };
-    if (name === 'charge' || name === 'authorize') return { ...common, name: name === 'charge' ? 'Charged' : 'Authorized', args: { id, merchant: args[1], payer: request.intent.signer, amount: args[2] } };
+    if (name === 'charge' || name === 'chargeInvoice' || name === 'authorize') return { ...common, name: name === 'authorize' ? 'Authorized' : 'Charged', args: { id, merchant: args[1], payer: request.intent.signer, amount: args[2] } };
     if (name === 'capture' || name === 'refund') return { ...common, name: name === 'capture' ? 'Captured' : 'Refunded', args: { id, amount: args[1], ...(name === 'refund' ? { reason: args[2] } : {}) } };
     if (name === 'void' || name === 'reclaim') return { ...common, name: name === 'void' ? 'Voided' : 'Reclaimed', args: { id } };
   } catch { /* Try the other allowlisted target ABI. */ }
   try {
-    const { functionName: name, args = [] } = decodeFunctionData({ abi: version === 2 ? subscriptionV2Abi : subscriptionAbi, data: request.data });
+    const { functionName: name, args = [] } = decodeFunctionData({ abi: subscriptionAbi, data: request.data });
     const contract = 'subscription' as const;
     if (name === 'charge') return { contract, name: 'Charged', args: { id: args[0], amount: args[1] } };
     if (name === 'cancel') return { contract, name: 'Cancelled', args: { id: args[0] } };
@@ -120,17 +120,16 @@ export class Indexer {
             const parsed = JSON.parse(intent.request_json) as IntentRequest;
             if (parsed?.intent && typeof parsed.data === 'string') request = parsed;
           } catch { /* Preserve the operation for review. */ }
-          const expected = request && expectedEvent(request, this.chain.subscriptionVersion);
+          const expected = request && expectedEvent(request);
           const objectId = refunds[0]?.payment_id ?? expected?.paymentId ?? intent.id;
           const identity = request && { signer: request.intent.signer, merchant: request.intent.merchant, nonce: request.intent.nonce };
           const refused = identity && events.find(event => matches(event, 'router', 'Refused', identity));
           const executed = identity && events.find(event => matches(event, 'router', 'Executed', { ...identity, target: request!.intent.target }));
           const target = expected && events.find(event => matches(event, expected.contract, expected.name, expected.args));
-          const funded = fundedRenewalEvidence(this.db, intent.id, events);
           const replacement = this.db.prepare('SELECT * FROM subscription_replacements WHERE intent_id=?').get(intent.id) as { old_id: string; new_id: string } | undefined;
           const replacementEvents: ChainEvent[] = [];
           if (expected?.name === 'Replaced') {
-            const decoded = decodeFunctionData({ abi: this.chain.subscriptionVersion === 2 ? subscriptionV2Abi : subscriptionAbi, data: request!.data });
+            const decoded = decodeFunctionData({ abi: subscriptionAbi, data: request!.data });
             const mandate = decoded.args![1] as { payer: Hex; merchant: Hex; planId: Hex };
             const created = events.find(event => matches(event, 'subscription', 'Subscribed', { id: expected.args.newId, payer: mandate.payer, merchant: mandate.merchant, planId: mandate.planId }));
             const cancelled = events.find(event => matches(event, 'subscription', 'Cancelled', { id: expected.args.oldId }));
@@ -148,9 +147,8 @@ export class Indexer {
             else count += this.recordEvent(refused);
             continue;
           }
-          if (receipt.status === 'success' && executed && target && (!funded || funded.matches) && (expected!.name !== 'Replaced' || replacementEvents.length === 2)) {
+          if (receipt.status === 'success' && executed && target && (expected!.name !== 'Replaced' || replacementEvents.length === 2)) {
             for (const event of replacementEvents) count += this.recordEvent(event);
-            if (funded?.reimbursement) count += this.recordEvent(funded.reimbursement);
             count += this.recordEvent(target);
             count += this.recordEvent(executed);
             this.db.prepare("UPDATE intents SET status='confirmed',reason=NULL WHERE id=?").run(intent.id);
@@ -235,7 +233,8 @@ export class Indexer {
     this.db.prepare("UPDATE payments SET status='captured',captured_minor=?,tx_hash=?,payer=COALESCE(payer,?),refund_deadline=NULL WHERE id=?").run(amount.toString(), e.txHash, String(args.payer).toLowerCase(), paymentId);
     this.db.prepare('INSERT OR IGNORE INTO financed_payments VALUES (?,?,?,?)').run(paymentId, String(args.claimId), String(args.toHolders ?? 0), String(args.toMerchant ?? 0));
     const metadata = storedMetadata(p.custom_metadata);
-    enqueueWebhook(this.db, p.merchant_id, 'payment.captured', paymentId, { ...context, amount_minor: amount.toString(), metadata, data: { amount: amountString(amount), currency: 'USDT', customer: p.customer ?? null, tx_hash: e.txHash, metadata, financed: true } });
+    const fee = BigInt(String(args.fee ?? 0));
+    enqueueWebhook(this.db, p.merchant_id, 'payment.captured', paymentId, { ...context, amount_minor: amount.toString(), fee_minor: fee.toString(), net_minor: (amount - fee).toString(), metadata, data: { amount: amountString(amount), fee: amountString(fee), net: amountString(amount - fee), currency: 'USDT', customer: p.customer ?? null, tx_hash: e.txHash, metadata, financed: true } });
     const invoiceId = (JSON.parse(p.metadata ?? '{}') as { invoiceId?: string }).invoiceId;
     if (!invoiceId) return;
     const invoice = this.db.prepare('SELECT * FROM invoices WHERE id=? AND merchant_id=?').get(invoiceId, p.merchant_id) as Record<string, string> | undefined;
@@ -279,7 +278,9 @@ export class Indexer {
         const captured = BigInt(p.captured_minor) + BigInt(String(args.amount));
         this.db.prepare("UPDATE payments SET status='captured',captured_minor=?,tx_hash=?,payer=COALESCE(?,payer) WHERE id=?").run(captured.toString(), e.txHash, args.payer ?? null, objectId);
         const metadata = storedMetadata(p.custom_metadata);
-        paidContext = { ...context, amount_minor: String(args.amount), metadata, data: { amount: amountString(String(args.amount)), currency: 'USDT', customer: p.customer ?? null, tx_hash: e.txHash, metadata } };
+        // Pact's fee came out of this payment: the merchant received the net.
+        const fee = BigInt(String(args.fee ?? 0));
+        paidContext = { ...context, amount_minor: String(args.amount), fee_minor: fee.toString(), net_minor: (BigInt(String(args.amount)) - fee).toString(), metadata, data: { amount: amountString(String(args.amount)), fee: amountString(fee), net: amountString(BigInt(String(args.amount)) - fee), currency: 'USDT', customer: p.customer ?? null, tx_hash: e.txHash, metadata } };
         enqueueWebhook(this.db, p.merchant_id, 'payment.captured', objectId, paidContext);
         const invoiceId = (JSON.parse(p.metadata ?? '{}') as { invoiceId?: string }).invoiceId;
         if (invoiceId) {
@@ -328,7 +329,7 @@ export class Indexer {
       }
       if (e.name === 'Refused') {
         const code = Number(args.reason);
-        const reason = ['cancelled','expired','too_early','cap_exceeded','max_periods','insufficient_funds','transfer_failed'][code] ?? String(args.reason);
+        const reason = ['cancelled','expired','too_early','cap_exceeded','max_periods','insufficient_funds','transfer_failed','fee_unavailable'][code] ?? String(args.reason);
         this.db.prepare('INSERT INTO refusal_attempts (id,merchant_id,object_id,reason,tx_hash,created_at,source) VALUES (?,?,?,?,?,?,?)').run(id('refusal'), s.merchant_id, s.id, reason, e.txHash, e.timestamp ?? now(), 'contract');
         this.db.prepare('UPDATE subscriptions SET pending_tx_hash=NULL WHERE id=?').run(s.id);
         enqueueWebhook(this.db, s.merchant_id, 'subscription.refused', s.id, { ...context, reason });
@@ -364,7 +365,7 @@ export class Indexer {
         const request = JSON.parse(intent.request_json) as IntentRequest;
         if (request.intent.merchant.toLowerCase() === String(args.merchant).toLowerCase()) {
           if (e.name === 'Refused') {
-            const reason = ['invalid_signature', 'deadline', 'replay', 'wrong_selector', 'quote_mismatch', 'dust', 'payer_daily_cap', 'gas_limit', 'gas_price', 'fee_too_low', 'tank_limit', 'fee_unavailable', 'target_failed', 'target_refused'][Number(args.reason)] ?? `router_refusal_${args.reason}`;
+            const reason = ROUTER_REFUSALS[Number(args.reason)] ?? `router_refusal_${args.reason}`;
             this.db.prepare("UPDATE intents SET status='refused',reason=? WHERE id=?").run(reason, intent.id);
             let objectId = intent.id;
             const refund = this.db.prepare("SELECT id,payment_id FROM refunds WHERE lower(tx_hash)=lower(?) AND status='pending'").get(e.txHash) as { id: string; payment_id: string } | undefined;
@@ -374,7 +375,7 @@ export class Indexer {
             } else {
               try {
                 const call = decodeFunctionData({ abi: escrowAbi, data: request.data });
-                if (call.functionName === 'charge') {
+                if (call.functionName === 'charge' || call.functionName === 'chargeInvoice') {
                   objectId = String(call.args![0]);
                   this.db.prepare("UPDATE payments SET status='failed',tx_hash=? WHERE id=? AND merchant_id=? AND status IN ('open','failed') AND captured_minor='0'").run(e.txHash, objectId, intent.merchant_id);
                 }
@@ -393,12 +394,8 @@ export class Indexer {
           }
         }
       }
-      if (e.name === 'Executed') {
-        recordAccounting(this.db, e);
-        const merchant = this.db.prepare('SELECT id FROM merchants WHERE lower(address)=lower(?)').get(String(args.merchant)) as { id: string } | undefined;
-        const sponsored = intent ? sponsoredAction(JSON.parse(intent.request_json) as IntentRequest) : null;
-        if (merchant) this.db.prepare('INSERT INTO gas_ledger(id,merchant_id,tx_hash,cost_wei,created_at,fee_usdt,action,object_id) VALUES (?,?,?,?,?,?,?,?)').run(id('gas'), merchant.id, e.txHash, String(args.reimbursement), e.timestamp ?? now(), String(args.feeUSDT ?? 0), sponsored?.action ?? null, sponsored?.objectId ?? null);
-      }
+      // A refund or buy-back's gas, charged to the merchant in USDT.
+      if (e.name === 'Executed') recordAccounting(this.db, e);
     }
   }
 }

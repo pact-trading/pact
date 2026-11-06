@@ -1,12 +1,11 @@
-import { FundedRenewals } from './funded-renewals.js';
-import type { Renewals } from './subscriptions-live.js';
+import { KeeperRenewals, type Renewals } from './subscriptions-live.js';
 import { Refusal, type ChainAdapter } from './types.js';
 import type { Db } from './db.js';
 import { now } from './db.js';
 import { enqueueWebhook } from './webhooks.js';
 import { sendDueReminders } from './invoices-live.js';
 
-export async function runKeeper(db: Db, chain: ChainAdapter, at = new Date(), renewals: Pick<FundedRenewals, 'chain' | 'renew'> | Pick<Renewals, 'chain' | 'renew'> = new FundedRenewals(db, chain)) {
+export async function runKeeper(db: Db, chain: ChainAdapter, at = new Date(), renewals: Pick<Renewals, 'chain' | 'renew'> = new KeeperRenewals(db, chain)) {
   if (renewals.chain !== chain) throw new Error('Keeper must share its ChainAdapter/AccountWriter');
   const invoices = db.prepare("SELECT * FROM invoices WHERE status IN ('sent','acknowledged','partially_paid','overdue')").all() as Array<Record<string, string>>;
   for (const invoice of invoices) {
